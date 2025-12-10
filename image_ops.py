@@ -132,3 +132,30 @@ def get_analysis_image_path(original_file_path):
             return None
         except: return None
     else: return original_file_path
+
+def detect_blur(image_path, threshold=0.0):
+    """
+    Mendeteksi keburaman gambar.
+    Return: (is_blurry: bool, score: float)
+    """
+    if threshold <= 0:
+        return False, 0.0 # Fitur dimatikan
+        
+    try:
+        # Baca gambar menggunakan OpenCV
+        img = cv2.imread(image_path)
+        if img is None:
+            return False, 0.0
+            
+        # Ubah ke Grayscale
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        # Hitung variansi Laplacian
+        score = cv2.Laplacian(gray, cv2.CV_64F).var()
+        
+        # Jika skor < threshold, maka gambar dianggap blur
+        is_blurry = score < threshold
+        return is_blurry, score
+    except Exception as e:
+        print(f"Blur check error: {e}")
+        return False, 0.0

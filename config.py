@@ -57,3 +57,8 @@ PROVIDERS = {
         }
     }
 }
+
+# System Reliability & Optimization Defaults
+DEFAULT_MAX_RETRIES = 3       # Berapa kali mencoba jika error
+DEFAULT_RETRY_DELAY = 2       # Detik jeda antar percobaan
+DEFAULT_BLUR_THRESHOLD = 0.0  # 0.0 artinya fitur dimatikan. Rekomendasi aktif: 100.0 - 150.0

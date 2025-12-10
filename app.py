@@ -1,4 +1,3 @@
-# app.py
 import streamlit as st
 import os
 import glob
@@ -10,7 +9,7 @@ import datetime
 import google.generativeai as genai
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Import Modul Buatan Sendiri
+# Import Modul Buatan Sendiri (Pastikan file-file ini ada di folder yang sama)
 from config import (
     MODEL_PRICES, PROMPT_PRESETS, PROVIDERS, 
     DEFAULT_INTERNAL_OUTPUT, BASE_WORK_DIR
@@ -97,6 +96,12 @@ with st.sidebar:
         if selected_menu == MENU_METADATA:
             with st.expander("Process Settings", expanded=True):
                 num_workers = st.slider("Worker Threads", 1, 10, 1)
+                
+                # --- [UPDATE] UI SETTINGS RETRY & BLUR ---
+                retry_count = st.slider("Max Retries (Jika Error)", 0, 5, 3, help="Jumlah percobaan ulang otomatis jika koneksi gagal.")
+                blur_limit = st.slider("Blur Threshold (Anti-Boncos)", 0.0, 300.0, 0.0, step=10.0, help="0 = Mati. 100-150 = Standar. Jika skor blur di bawah angka ini, file di-skip (Hemat API).")
+                # -----------------------------------------
+                
                 opt_rename = st.checkbox("Auto-Rename File", True) 
                 opt_folder = st.checkbox("Auto-Folder Category", True)
 
@@ -251,7 +256,12 @@ elif selected_menu == MENU_METADATA:
                 def read_proc(fpath):
                     fname = os.path.basename(fpath)
                     try:
-                        return process_single_file(fname, provider_choice, final_model_name, api_key, base_url, 3, opts, prompt_str, ACTIVE_INPUT_DIR)
+                        # [UPDATE] Pass variable retry_count dan blur_limit ke fungsi processor
+                        return process_single_file(
+                            fname, provider_choice, final_model_name, api_key, base_url, 
+                            retry_count, opts, prompt_str, ACTIVE_INPUT_DIR, 
+                            blur_threshold=blur_limit
+                        )
                     except Exception as e: return {"status": "error", "file": fname, "msg": str(e)}
 
                 with ThreadPoolExecutor(max_workers=num_workers) as exe:
@@ -321,9 +331,15 @@ elif selected_menu == MENU_METADATA:
 
                                 except Exception as e:
                                     st.error(f"Move Error: {e}")
+                            
+                            # [UPDATE] Penanganan File yang di-Skip (Blur/Rejected)
+                            elif res["status"] == "skipped":
+                                st.warning(f"⚠️ `{res['file']}`: {res['msg']}")
+                            
                             else:
                                 count_err += 1
                                 st.markdown(f"❌ `{res['file']}`: {res['msg']}")
+                                
                         prog_bar.progress((i+1)/len(files_to_process))
                         stat_success.metric("Success", count_ok)
                         stat_fail.metric("Fail", count_err)
