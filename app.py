@@ -15,17 +15,70 @@ import subprocess
 import pandas as pd
 import shutil
 import base64
+import sqlite3  # <--- LIBRARY DATABASE
 from PIL import Image, ImageStat
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+# ================= KONFIGURASI DATABASE =================
+DB_FILE = "gemini_history.db"
+
+def init_db():
+    """Membuat tabel history jika belum ada"""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            filename TEXT,
+            new_filename TEXT,
+            title TEXT,
+            description TEXT,
+            keywords TEXT,
+            category TEXT,
+            output_path TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def add_history_entry(filename, new_filename, title, desc, keywords, category, output_path):
+    """Menambahkan catatan baru ke database"""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    c.execute('''
+        INSERT INTO history (timestamp, filename, new_filename, title, description, keywords, category, output_path)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (ts, filename, new_filename, title, desc, keywords, category, output_path))
+    conn.commit()
+    conn.close()
+
+def get_history_df():
+    """Mengambil data history sebagai DataFrame"""
+    conn = sqlite3.connect(DB_FILE)
+    try:
+        df = pd.read_sql_query("SELECT * FROM history ORDER BY id DESC", conn)
+        return df
+    except:
+        return pd.DataFrame()
+    finally:
+        conn.close()
+
+def clear_history():
+    """Menghapus semua history"""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("DELETE FROM history")
+    conn.commit()
+    conn.close()
+
+# Inisialisasi DB saat aplikasi jalan
+init_db()
+
 # ================= FUNGSI KHUSUS WSL (MAGIC FOLDER PICKER) =================
 def select_folder_from_wsl(dialog_title="Pilih Folder"):
-    """
-    Membuka Windows Folder Dialog dari dalam WSL menggunakan PowerShell.
-    Menerima parameter 'dialog_title' agar bisa beda judul untuk Input/Output.
-    """
     try:
-        # Script PowerShell dinamis
         ps_script = f"""
         Add-Type -AssemblyName System.Windows.Forms
         $f = New-Object System.Windows.Forms.FolderBrowserDialog
@@ -37,15 +90,11 @@ def select_folder_from_wsl(dialog_title="Pilih Folder"):
         """
         cmd = ["powershell.exe", "-Command", ps_script]
         windows_path = subprocess.check_output(cmd).decode().strip()
-        
         if not windows_path: return None
-
-        # Konversi Path Windows (D:\Foto) ke WSL (/mnt/d/Foto)
         windows_path = windows_path.strip()
         drive_letter = windows_path[0].lower()
         path_tail = windows_path[2:].replace("\\", "/")
         wsl_path = f"/mnt/{drive_letter}{path_tail}"
-        
         return wsl_path
     except Exception as e:
         return None
@@ -53,8 +102,6 @@ def select_folder_from_wsl(dialog_title="Pilih Folder"):
 # ================= KONFIGURASI PATH DEFAULT =================
 BASE_WORK_DIR = os.getcwd()
 DEFAULT_INTERNAL_OUTPUT = os.path.join(BASE_WORK_DIR, "output")
-
-# Buat folder output default jika belum ada (untuk jaga-jaga)
 if not os.path.exists(DEFAULT_INTERNAL_OUTPUT):
     try: os.makedirs(DEFAULT_INTERNAL_OUTPUT)
     except: pass
@@ -264,8 +311,6 @@ def get_analysis_image_path(original_file_path):
 # ================= WORKER PROCESS (OPTIMIZED MEMORY) =================
 def process_single_file(filename, provider_type, model_name, api_key, base_url, max_retries, options, full_prompt_string, source_dir):
     thread_id = str(time.time()).replace('.', '')
-    
-    # Path Logic
     source_full_path = os.path.join(source_dir, filename)
     temp_file_name = f"temp_{thread_id}_{filename}"
     working_path = os.path.join(BASE_WORK_DIR, temp_file_name)
@@ -274,11 +319,7 @@ def process_single_file(filename, provider_type, model_name, api_key, base_url, 
     optimizer = StockPhotoOptimizer()
     
     try:
-        # [MEMORY OPTIMIZATION]
-        # Alih-alih membaca ke RAM, kita COPY file dari Source ke Temp (Disk-to-Disk)
         shutil.copy2(source_full_path, working_path)
-        
-        # Ekstrak preview dari file TEMP
         preview_path = get_analysis_image_path(working_path)
         if not preview_path: raise ValueError("Gagal ekstrak visual file.")
         
@@ -324,7 +365,6 @@ def process_single_file(filename, provider_type, model_name, api_key, base_url, 
         elif ext in ['.eps', '.ai']:
              tags_to_write.update({ "IPTC:Headline": title, "IPTC:Keywords": kw })
         
-        # ExifTool bekerja langsung pada file TEMP di disk (Hemat RAM)
         with exiftool.ExifToolHelper() as et:
             et.set_tags(working_path, tags=tags_to_write, params=["-overwrite_original", "-codedcharacterset=utf8"])
         
@@ -333,13 +373,12 @@ def process_single_file(filename, provider_type, model_name, api_key, base_url, 
             safe_title = clean_filename(title)
             final_name = f"{safe_title}{ext}"
         
-        # Return path file temp agar Main Thread bisa memindahkannya (move)
         return {
             "status": "success", 
             "file": filename, 
             "new_name": final_name, 
             "category": category, 
-            "temp_result_path": working_path, # Path ke file hasil
+            "temp_result_path": working_path, 
             "meta_title": title, 
             "meta_desc": desc, 
             "meta_kw": ", ".join(kw)
@@ -368,6 +407,7 @@ if 'active_preset_name' not in st.session_state:
 MENU_HOME = "Home"
 MENU_METADATA = "Metadata Automation"
 MENU_PROMPT = "Prompt Architect"
+MENU_HISTORY = "History Log" # <--- MENU BARU
 
 if 'nav_selection' not in st.session_state:
     st.session_state['nav_selection'] = MENU_HOME
@@ -378,7 +418,6 @@ if 'selected_folder_path' not in st.session_state:
 if 'selected_output_path' not in st.session_state:
     st.session_state['selected_output_path'] = ""
 
-# Callback Navigation
 def go_to_metadata(): st.session_state['nav_selection'] = MENU_METADATA
 def go_to_prompt(): st.session_state['nav_selection'] = MENU_PROMPT
 def update_preset():
@@ -388,7 +427,6 @@ def update_preset():
     st.session_state['active_desc_rule'] = PROMPT_PRESETS[selected]['desc']
     st.toast(f"Style changed to: {selected}")
 
-# Callback Button Picker
 def handle_input_picker():
     path = select_folder_from_wsl("Pilih Folder SUMBER (Input) Foto/Video")
     if path:
@@ -404,10 +442,10 @@ def handle_output_picker():
 # --- SIDEBAR ---
 with st.sidebar:
     st.title("Navigation")
-    selected_menu = st.radio("Go to:", [MENU_HOME, MENU_METADATA, MENU_PROMPT], key="nav_selection")
+    selected_menu = st.radio("Go to:", [MENU_HOME, MENU_METADATA, MENU_PROMPT, MENU_HISTORY], key="nav_selection")
     st.divider()
     
-    if selected_menu != MENU_HOME:
+    if selected_menu != MENU_HOME and selected_menu != MENU_HISTORY:
         with st.expander("AI Configuration", expanded=True):
             provider_choice = st.selectbox("AI Provider", list(PROVIDERS.keys()), index=0)
             current_provider_config = PROVIDERS[provider_choice]
@@ -455,7 +493,6 @@ if selected_menu == MENU_HOME:
 elif selected_menu == MENU_METADATA:
     st.subheader("Metadata Automation")
     
-    # --- STYLE SELECTOR ---
     with st.container(border=True):
         c_sel, c_stat = st.columns([3, 1])
         with c_sel:
@@ -468,10 +505,8 @@ elif selected_menu == MENU_METADATA:
             if api_key: st.success("System Ready")
             else: st.error("API Key Needed")
 
-    # --- FOLDER PICKERS (INPUT & OUTPUT) ---
     st.divider()
     
-    # INPUT SECTION
     st.markdown("### 1. Source (Input)")
     col_in_btn, col_in_path = st.columns([1, 4])
     with col_in_btn:
@@ -479,7 +514,6 @@ elif selected_menu == MENU_METADATA:
     with col_in_path:
         st.text_input("Input Path", value=st.session_state['selected_folder_path'], disabled=True, label_visibility="collapsed", placeholder="Select source folder...")
 
-    # OUTPUT SECTION
     st.markdown("### 2. Destination (Output)")
     col_out_btn, col_out_path = st.columns([1, 4])
     with col_out_btn:
@@ -487,10 +521,8 @@ elif selected_menu == MENU_METADATA:
     with col_out_path:
         st.text_input("Output Path", value=st.session_state['selected_output_path'], disabled=True, label_visibility="collapsed", placeholder="Select destination folder (Optional, default: internal)")
 
-    # --- SCANNING LOGIC ---
     ACTIVE_INPUT_DIR = st.session_state['selected_folder_path']
     
-    # Determine Output Directory
     if st.session_state['selected_output_path']:
         ACTIVE_OUTPUT_DIR = st.session_state['selected_output_path']
         output_msg = f"Saving to: `{ACTIVE_OUTPUT_DIR}`"
@@ -508,7 +540,6 @@ elif selected_menu == MENU_METADATA:
         
         st.info(f"**{len(local_files)} File(s)** found in Input. | {output_msg}")
         
-        # BUTTON START
         ready = len(local_files) > 0 and api_key
         if st.button("Start Batch Process", type="primary", disabled=not ready):
             log_cont = st.container(height=400, border=True)
@@ -532,7 +563,6 @@ elif selected_menu == MENU_METADATA:
             def read_proc(fpath):
                 fname = os.path.basename(fpath)
                 try:
-                    # PASS FILENAME, NOT DATA (MEMORY OPTIMIZED)
                     return process_single_file(fname, provider_choice, final_model_name, api_key, base_url, 3, opts, prompt_str, ACTIVE_INPUT_DIR)
                 except Exception as e: return {"status": "error", "file": fname, "msg": str(e)}
 
@@ -553,7 +583,6 @@ elif selected_menu == MENU_METADATA:
                                 "Keywords": res['meta_kw'], "Category": cat
                             })
                             
-                            # MOVE FROM TEMP TO FINAL DESTINATION
                             tdir = os.path.join(ACTIVE_OUTPUT_DIR, cat) if opt_folder else ACTIVE_OUTPUT_DIR
                             if not os.path.exists(tdir): os.makedirs(tdir)
                             final_file_path = os.path.join(tdir, fname)
@@ -561,6 +590,8 @@ elif selected_menu == MENU_METADATA:
                             try:
                                 shutil.move(temp_path, final_file_path)
                                 st.markdown(f"✅ `{res['file']}` -> `{cat}/{fname}`")
+                                # [LOG TO DB] Catat sukses ke SQLite
+                                add_history_entry(res['file'], fname, res['meta_title'], res['meta_desc'], res['meta_kw'], cat, final_file_path)
                             except Exception as e:
                                 st.error(f"Move Error: {e}")
                         else:
@@ -572,26 +603,21 @@ elif selected_menu == MENU_METADATA:
             
             st.success("Batch Complete.")
             if csv_data:
-                # Generate 4 CSVs in ACTIVE_OUTPUT_DIR
                 df = pd.DataFrame(csv_data)
                 csv_dir = os.path.join(ACTIVE_OUTPUT_DIR, "csv_reports")
                 ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
                 
-                # Master
                 os.makedirs(os.path.join(csv_dir, "Master_Database"), exist_ok=True)
                 df.to_csv(os.path.join(csv_dir, "Master_Database", f"master_{ts}.csv"), index=False)
                 
-                # Adobe
                 os.makedirs(os.path.join(csv_dir, "Adobe"), exist_ok=True)
                 dfa = pd.DataFrame({'Filename': df['New Filename'], 'Title': df['Title'], 'Keywords': df['Keywords'], 'Category': df['Category'], 'Releases': ''})
                 dfa.to_csv(os.path.join(csv_dir, "Adobe", f"adobe_{ts}.csv"), index=False)
                 
-                # SS
                 os.makedirs(os.path.join(csv_dir, "Shutterstock"), exist_ok=True)
                 dfs = pd.DataFrame({'Filename': df['New Filename'], 'Description': df['Description'], 'Keywords': df['Keywords'], 'Categories': df['Category'], 'Editorial': 'No', 'Mature content': 'No', 'illustration': 'No'})
                 dfs.to_csv(os.path.join(csv_dir, "Shutterstock", f"ss_{ts}.csv"), index=False)
                 
-                # Getty
                 os.makedirs(os.path.join(csv_dir, "Getty"), exist_ok=True)
                 dfg = pd.DataFrame({'file name': df['New Filename'], 'title': df['Title'], 'description': df['Description'], 'keywords': df['Keywords'], 'country': 'Indonesia', 'brief code': '', 'created date': ''})
                 dfg.to_csv(os.path.join(csv_dir, "Getty", f"getty_{ts}.csv"), index=False)
@@ -627,3 +653,30 @@ elif selected_menu == MENU_PROMPT:
         if 'gen_result' in st.session_state:
             st.code(st.session_state['gen_result'], language="text")
         else: st.info("Result here.")
+
+# ================= PAGE: HISTORY LOG (NEW) =================
+elif selected_menu == MENU_HISTORY:
+    st.subheader("Process History Log")
+    st.write("Database records of all successfully processed files.")
+    
+    col_h1, col_h2 = st.columns([4, 1])
+    with col_h2:
+        if st.button("🗑️ Clear History", type="primary"):
+            clear_history()
+            st.rerun()
+
+    df_hist = get_history_df()
+    if not df_hist.empty:
+        st.dataframe(df_hist, use_container_width=True)
+        
+        # Download Master CSV from History
+        csv = df_hist.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            "Download Full History (CSV)",
+            csv,
+            "full_history_dump.csv",
+            "text/csv",
+            key='download-csv'
+        )
+    else:
+        st.info("No history records found yet.")
