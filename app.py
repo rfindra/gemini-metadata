@@ -15,7 +15,7 @@ import subprocess
 import pandas as pd
 import shutil
 import base64
-import sqlite3  # <--- LIBRARY DATABASE
+import sqlite3
 from PIL import Image, ImageStat
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -23,7 +23,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 DB_FILE = "gemini_history.db"
 
 def init_db():
-    """Membuat tabel history jika belum ada"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''
@@ -43,7 +42,6 @@ def init_db():
     conn.close()
 
 def add_history_entry(filename, new_filename, title, desc, keywords, category, output_path):
-    """Menambahkan catatan baru ke database"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -55,7 +53,6 @@ def add_history_entry(filename, new_filename, title, desc, keywords, category, o
     conn.close()
 
 def get_history_df():
-    """Mengambil data history sebagai DataFrame"""
     conn = sqlite3.connect(DB_FILE)
     try:
         df = pd.read_sql_query("SELECT * FROM history ORDER BY id DESC", conn)
@@ -66,15 +63,44 @@ def get_history_df():
         conn.close()
 
 def clear_history():
-    """Menghapus semua history"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("DELETE FROM history")
     conn.commit()
     conn.close()
 
-# Inisialisasi DB saat aplikasi jalan
 init_db()
+
+# ================= PRICING DATABASE (DYNAMIC) =================
+# Harga per 1 Juta Token (Estimasi USD) - Update sesuai provider
+MODEL_PRICES = {
+    # Google
+    "gemini-2.5-flash": {"in": 0.075, "out": 0.30},
+    "gemini-2.5-flash-lite": {"in": 0.0375, "out": 0.15},
+    "gemma-3-27b": {"in": 0.20, "out": 0.20}, # Est. OpenRouter
+    "gemma-3-12b": {"in": 0.10, "out": 0.10},
+    
+    # OpenAI / Others (jika pakai OpenRouter)
+    "gpt-4o": {"in": 2.50, "out": 10.00},
+    "gpt-4o-mini": {"in": 0.15, "out": 0.60},
+    "claude-3-haiku": {"in": 0.25, "out": 1.25},
+    "sonar": {"in": 1.0, "out": 1.0}, # Perplexity
+    
+    # Fallback Default
+    "default": {"in": 0.10, "out": 0.40}
+}
+
+def calculate_cost(model_name, tokens_in, tokens_out):
+    """Menghitung biaya berdasarkan model ID"""
+    price = MODEL_PRICES["default"]
+    # Cari harga yang cocok (partial match)
+    for key in MODEL_PRICES:
+        if key in model_name.lower():
+            price = MODEL_PRICES[key]
+            break
+            
+    cost = (tokens_in / 1_000_000 * price["in"]) + (tokens_out / 1_000_000 * price["out"])
+    return cost
 
 # ================= FUNGSI KHUSUS WSL (MAGIC FOLDER PICKER) =================
 def select_folder_from_wsl(dialog_title="Pilih Folder"):
@@ -151,15 +177,22 @@ def construct_prompt_template(title_rule, desc_rule):
     4. No markdown. Only JSON.
     """
 
-# ================= PROVIDER DATA =================
+# ================= PROVIDER DATA (DEFAULT: GEMMA 3) =================
 PROVIDERS = {
     "Google Gemini (Native)": {
         "base_url": None,
         "models": {
+            # Urutan diubah agar Gemma 3 jadi default
+            "Gemma 3 - 27B (High Intelligence)": "gemma-3-27b-it", 
+            "Gemma 3 - 12B (Balanced)": "gemma-3-12b-it",
             "Gemini 2.5 Flash (New Standard)": "gemini-2.5-flash",
             "Gemini 2.5 Flash Lite (Efficiency)": "gemini-2.5-flash-lite",
-            "Gemma 3 - 27B (High Intelligence)": "gemma-3-27b-it",
-            "Gemma 3 - 12B (Balanced)": "gemma-3-12b-it",
+        }
+    },
+    "OpenAI / OpenRouter / Perplexity": {
+        "base_url": "https://openrouter.ai/api/v1",
+        "models": {
+            "Auto Detect (Type Manual ID below)": "manual-entry"
         }
     }
 }
@@ -255,6 +288,40 @@ def extract_json(text):
                     except: continue
     return {}
 
+def create_xmp_sidecar(path_without_ext, title, desc, keywords):
+    try:
+        rdf_keywords = "\n".join([f"<rdf:li>{k}</rdf:li>" for k in keywords])
+        xmp_content = f"""<?xpacket begin='' id='W5M0MpCehiHzreSzNTczkc9d'?>
+<x:xmpmeta xmlns:x='adobe:ns:meta/'>
+  <rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'>
+    <rdf:Description rdf:about=''
+      xmlns:dc='http://purl.org/dc/elements/1.1/'>
+      <dc:title>
+        <rdf:Alt>
+          <rdf:li xml:lang='x-default'>{title}</rdf:li>
+        </rdf:Alt>
+      </dc:title>
+      <dc:description>
+        <rdf:Alt>
+          <rdf:li xml:lang='x-default'>{desc}</rdf:li>
+        </rdf:Alt>
+      </dc:description>
+      <dc:subject>
+        <rdf:Bag>
+          {rdf_keywords}
+        </rdf:Bag>
+      </dc:subject>
+    </rdf:Description>
+  </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end='w'?>"""
+        xmp_path = f"{path_without_ext}.xmp"
+        with open(xmp_path, "w", encoding="utf-8") as f:
+            f.write(xmp_content)
+        return xmp_path
+    except:
+        return None
+
 def run_gemini_engine(model_name, api_key, image_path, prompt):
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(model_name)
@@ -308,14 +375,16 @@ def get_analysis_image_path(original_file_path):
         except: return None
     else: return original_file_path
 
-# ================= WORKER PROCESS (OPTIMIZED MEMORY) =================
+# ================= WORKER PROCESS =================
 def process_single_file(filename, provider_type, model_name, api_key, base_url, max_retries, options, full_prompt_string, source_dir):
     thread_id = str(time.time()).replace('.', '')
+    
     source_full_path = os.path.join(source_dir, filename)
     temp_file_name = f"temp_{thread_id}_{filename}"
     working_path = os.path.join(BASE_WORK_DIR, temp_file_name)
     
     preview_path = None
+    preview_bytes = None
     optimizer = StockPhotoOptimizer()
     
     try:
@@ -323,6 +392,11 @@ def process_single_file(filename, provider_type, model_name, api_key, base_url, 
         preview_path = get_analysis_image_path(working_path)
         if not preview_path: raise ValueError("Gagal ekstrak visual file.")
         
+        try:
+            with open(preview_path, "rb") as fimg:
+                preview_bytes = fimg.read()
+        except: pass
+
         tech_specs = optimizer.analyze_technical_specs(preview_path)
         context_injection = tech_specs['context_str']
         prompt = full_prompt_string.replace("{context_injection}", context_injection)
@@ -367,11 +441,17 @@ def process_single_file(filename, provider_type, model_name, api_key, base_url, 
         
         with exiftool.ExifToolHelper() as et:
             et.set_tags(working_path, tags=tags_to_write, params=["-overwrite_original", "-codedcharacterset=utf8"])
+
+        temp_xmp_path = create_xmp_sidecar(os.path.splitext(working_path)[0], title, desc, kw)
         
         final_name = filename
         if options["rename"]:
             safe_title = clean_filename(title)
             final_name = f"{safe_title}{ext}"
+        
+        # Token Estimation (Standard Heuristic for Stock Metadata)
+        est_input_tokens = 258 + 300 
+        est_output_tokens = 200
         
         return {
             "status": "success", 
@@ -379,9 +459,13 @@ def process_single_file(filename, provider_type, model_name, api_key, base_url, 
             "new_name": final_name, 
             "category": category, 
             "temp_result_path": working_path, 
+            "temp_xmp_path": temp_xmp_path, 
             "meta_title": title, 
             "meta_desc": desc, 
-            "meta_kw": ", ".join(kw)
+            "meta_kw": ", ".join(kw),
+            "preview_bytes": preview_bytes, 
+            "tokens_in": est_input_tokens,
+            "tokens_out": est_output_tokens
         }
         
     except Exception as e:
@@ -407,7 +491,7 @@ if 'active_preset_name' not in st.session_state:
 MENU_HOME = "Home"
 MENU_METADATA = "Metadata Automation"
 MENU_PROMPT = "Prompt Architect"
-MENU_HISTORY = "History Log" # <--- MENU BARU
+MENU_HISTORY = "History Log"
 
 if 'nav_selection' not in st.session_state:
     st.session_state['nav_selection'] = MENU_HOME
@@ -457,10 +541,10 @@ with st.sidebar:
         if selected_menu == MENU_METADATA:
             with st.expander("Process Settings", expanded=True):
                 num_workers = st.slider("Worker Threads", 1, 10, 1)
-                opt_rename = st.checkbox("Auto-Rename File", False)
+                # [DEFAULT UPDATE] Auto-Rename = True
+                opt_rename = st.checkbox("Auto-Rename File", True) 
                 opt_folder = st.checkbox("Auto-Folder Category", True)
 
-    # --- SYSTEM CONTROLS ---
     st.divider()
     st.caption("System Controls")
     col_sys1, col_sys2 = st.columns(2)
@@ -540,90 +624,159 @@ elif selected_menu == MENU_METADATA:
         
         st.info(f"**{len(local_files)} File(s)** found in Input. | {output_msg}")
         
-        ready = len(local_files) > 0 and api_key
-        if st.button("Start Batch Process", type="primary", disabled=not ready):
-            log_cont = st.container(height=400, border=True)
-            log_cont.empty()
-            st.toast("Processing...")
+        # --- [NEW] COST PREVIEW & LIMITER SECTION ---
+        if len(local_files) > 0:
+            st.divider()
+            st.markdown("### 📊 Estimasi & Limit (Anti Boncos)")
             
-            c1, c2, c3 = st.columns(3)
-            with c1: stat_success = st.metric("Success", "0")
-            with c2: stat_fail = st.metric("Fail", "0")
-            with c3: st.metric("Target", str(len(local_files)))
+            # Smart Estimation based on Selected Model
+            # Input: Image ~258 + Text ~300 = ~558 tokens. Output ~200 tokens.
+            input_est_unit = 558
+            output_est_unit = 200
             
-            count_ok = 0
-            count_err = 0
-            csv_data = []
-            opts = {"rename": opt_rename}
-            base_url = current_provider_config.get("base_url")
-            prog_bar = st.progress(0)
+            # Cek harga model yang aktif
+            # Secara default pakai harga fallback jika tidak ketemu
+            current_pricing = MODEL_PRICES["default"]
+            model_key_found = False
+            for k in MODEL_PRICES:
+                if k in final_model_name.lower():
+                    current_pricing = MODEL_PRICES[k]
+                    model_key_found = True
+                    break
             
-            prompt_str = construct_prompt_template(st.session_state['active_title_rule'], st.session_state['active_desc_rule'])
+            est_cost_per_file = ((input_est_unit / 1_000_000) * current_pricing["in"]) + ((output_est_unit / 1_000_000) * current_pricing["out"])
             
-            def read_proc(fpath):
-                fname = os.path.basename(fpath)
-                try:
-                    return process_single_file(fname, provider_choice, final_model_name, api_key, base_url, 3, opts, prompt_str, ACTIVE_INPUT_DIR)
-                except Exception as e: return {"status": "error", "file": fname, "msg": str(e)}
+            col_calc1, col_calc2 = st.columns(2)
+            with col_calc1:
+                files_limit = st.slider("Berapa file yang ingin diproses?", 1, len(local_files), len(local_files))
+            
+            with col_calc2:
+                total_est_cost = est_cost_per_file * files_limit
+                model_display = f"{final_model_name}" if model_key_found else f"{final_model_name} (Using Default Rate)"
+                st.metric(f"Estimasi Biaya ({model_display})", f"${total_est_cost:.5f}")
 
-            with ThreadPoolExecutor(max_workers=num_workers) as exe:
-                futures = {exe.submit(read_proc, fp): fp for fp in local_files}
-                for i, fut in enumerate(as_completed(futures)):
-                    res = fut.result()
-                    with log_cont:
-                        if res["status"] == "success":
-                            count_ok += 1
-                            cat = res['category']
-                            fname = res['new_name']
-                            temp_path = res['temp_result_path']
-                            
-                            csv_data.append({
-                                "Original Name": res['file'], "New Filename": fname,
-                                "Title": res['meta_title'], "Description": res['meta_desc'],
-                                "Keywords": res['meta_kw'], "Category": cat
-                            })
-                            
-                            tdir = os.path.join(ACTIVE_OUTPUT_DIR, cat) if opt_folder else ACTIVE_OUTPUT_DIR
-                            if not os.path.exists(tdir): os.makedirs(tdir)
-                            final_file_path = os.path.join(tdir, fname)
-                            
-                            try:
-                                shutil.move(temp_path, final_file_path)
-                                st.markdown(f"✅ `{res['file']}` -> `{cat}/{fname}`")
-                                # [LOG TO DB] Catat sukses ke SQLite
-                                add_history_entry(res['file'], fname, res['meta_title'], res['meta_desc'], res['meta_kw'], cat, final_file_path)
-                            except Exception as e:
-                                st.error(f"Move Error: {e}")
-                        else:
-                            count_err += 1
-                            st.markdown(f"❌ `{res['file']}`: {res['msg']}")
-                    prog_bar.progress((i+1)/len(local_files))
-                    stat_success.metric("Success", count_ok)
-                    stat_fail.metric("Fail", count_err)
+            files_to_process = local_files[:files_limit]
             
-            st.success("Batch Complete.")
-            if csv_data:
-                df = pd.DataFrame(csv_data)
-                csv_dir = os.path.join(ACTIVE_OUTPUT_DIR, "csv_reports")
-                ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+            ready = len(files_to_process) > 0 and api_key
+            if st.button(f"Start Process ({len(files_to_process)} Files)", type="primary", disabled=not ready):
+                log_cont = st.container(height=400, border=True)
+                log_cont.empty()
+                st.toast("Processing...")
                 
-                os.makedirs(os.path.join(csv_dir, "Master_Database"), exist_ok=True)
-                df.to_csv(os.path.join(csv_dir, "Master_Database", f"master_{ts}.csv"), index=False)
+                c1, c2, c3 = st.columns(3)
+                with c1: stat_success = st.metric("Success", "0")
+                with c2: stat_fail = st.metric("Fail", "0")
+                with c3: st.metric("Target", str(len(files_to_process)))
                 
-                os.makedirs(os.path.join(csv_dir, "Adobe"), exist_ok=True)
-                dfa = pd.DataFrame({'Filename': df['New Filename'], 'Title': df['Title'], 'Keywords': df['Keywords'], 'Category': df['Category'], 'Releases': ''})
-                dfa.to_csv(os.path.join(csv_dir, "Adobe", f"adobe_{ts}.csv"), index=False)
+                c_cost1, c_cost2 = st.columns(2)
+                with c_cost1: metric_tokens = st.empty()
+                with c_cost2: metric_dollar = st.empty()
                 
-                os.makedirs(os.path.join(csv_dir, "Shutterstock"), exist_ok=True)
-                dfs = pd.DataFrame({'Filename': df['New Filename'], 'Description': df['Description'], 'Keywords': df['Keywords'], 'Categories': df['Category'], 'Editorial': 'No', 'Mature content': 'No', 'illustration': 'No'})
-                dfs.to_csv(os.path.join(csv_dir, "Shutterstock", f"ss_{ts}.csv"), index=False)
+                count_ok = 0
+                count_err = 0
+                total_tokens_in = 0
+                total_tokens_out = 0
                 
-                os.makedirs(os.path.join(csv_dir, "Getty"), exist_ok=True)
-                dfg = pd.DataFrame({'file name': df['New Filename'], 'title': df['Title'], 'description': df['Description'], 'keywords': df['Keywords'], 'country': 'Indonesia', 'brief code': '', 'created date': ''})
-                dfg.to_csv(os.path.join(csv_dir, "Getty", f"getty_{ts}.csv"), index=False)
+                csv_data = []
+                gallery_images = []
                 
-                st.balloons()
-                st.info(f"All reports saved in: `{csv_dir}`")
+                opts = {"rename": opt_rename}
+                base_url = current_provider_config.get("base_url")
+                prog_bar = st.progress(0)
+                
+                prompt_str = construct_prompt_template(st.session_state['active_title_rule'], st.session_state['active_desc_rule'])
+                
+                def read_proc(fpath):
+                    fname = os.path.basename(fpath)
+                    try:
+                        return process_single_file(fname, provider_choice, final_model_name, api_key, base_url, 3, opts, prompt_str, ACTIVE_INPUT_DIR)
+                    except Exception as e: return {"status": "error", "file": fname, "msg": str(e)}
+
+                with ThreadPoolExecutor(max_workers=num_workers) as exe:
+                    futures = {exe.submit(read_proc, fp): fp for fp in files_to_process}
+                    for i, fut in enumerate(as_completed(futures)):
+                        res = fut.result()
+                        with log_cont:
+                            if res["status"] == "success":
+                                count_ok += 1
+                                cat = res['category']
+                                fname = res['new_name']
+                                temp_path = res['temp_result_path']
+                                temp_xmp = res['temp_xmp_path']
+                                
+                                # Real Cost Calculation
+                                t_in = res.get("tokens_in", 0)
+                                t_out = res.get("tokens_out", 0)
+                                total_tokens_in += t_in
+                                total_tokens_out += t_out
+                                
+                                # Hitung biaya real-time
+                                real_cost = calculate_cost(final_model_name, total_tokens_in, total_tokens_out)
+                                
+                                metric_tokens.metric("Total Tokens", f"{total_tokens_in + total_tokens_out:,}")
+                                metric_dollar.metric("Real Cost ($)", f"${real_cost:.4f}")
+
+                                csv_data.append({
+                                    "Original Name": res['file'], "New Filename": fname,
+                                    "Title": res['meta_title'], "Description": res['meta_desc'],
+                                    "Keywords": res['meta_kw'], "Category": cat
+                                })
+                                
+                                if res.get('preview_bytes'):
+                                    gallery_images.append((fname, res['preview_bytes']))
+                                
+                                tdir = os.path.join(ACTIVE_OUTPUT_DIR, cat) if opt_folder else ACTIVE_OUTPUT_DIR
+                                if not os.path.exists(tdir): os.makedirs(tdir)
+                                final_file_path = os.path.join(tdir, fname)
+                                
+                                try:
+                                    shutil.move(temp_path, final_file_path)
+                                    if temp_xmp and os.path.exists(temp_xmp):
+                                        final_xmp_name = os.path.splitext(fname)[0] + ".xmp"
+                                        shutil.move(temp_xmp, os.path.join(tdir, final_xmp_name))
+                                        
+                                    st.markdown(f"✅ `{res['file']}` -> `{cat}/{fname}` (+XMP)")
+                                    add_history_entry(res['file'], fname, res['meta_title'], res['meta_desc'], res['meta_kw'], cat, final_file_path)
+                                except Exception as e:
+                                    st.error(f"Move Error: {e}")
+                            else:
+                                count_err += 1
+                                st.markdown(f"❌ `{res['file']}`: {res['msg']}")
+                        prog_bar.progress((i+1)/len(files_to_process))
+                        stat_success.metric("Success", count_ok)
+                        stat_fail.metric("Fail", count_err)
+                
+                st.success("Batch Complete.")
+                
+                if gallery_images:
+                    with st.expander("✨ Processed Gallery (Preview)", expanded=True):
+                        cols = st.columns(4)
+                        for idx, (img_name, img_bytes) in enumerate(gallery_images):
+                            with cols[idx % 4]:
+                                st.image(img_bytes, caption=img_name, use_container_width=True)
+
+                if csv_data:
+                    df = pd.DataFrame(csv_data)
+                    csv_dir = os.path.join(ACTIVE_OUTPUT_DIR, "csv_reports")
+                    ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+                    
+                    os.makedirs(os.path.join(csv_dir, "Master_Database"), exist_ok=True)
+                    df.to_csv(os.path.join(csv_dir, "Master_Database", f"master_{ts}.csv"), index=False)
+                    
+                    os.makedirs(os.path.join(csv_dir, "Adobe"), exist_ok=True)
+                    dfa = pd.DataFrame({'Filename': df['New Filename'], 'Title': df['Title'], 'Keywords': df['Keywords'], 'Category': df['Category'], 'Releases': ''})
+                    dfa.to_csv(os.path.join(csv_dir, "Adobe", f"adobe_{ts}.csv"), index=False)
+                    
+                    os.makedirs(os.path.join(csv_dir, "Shutterstock"), exist_ok=True)
+                    dfs = pd.DataFrame({'Filename': df['New Filename'], 'Description': df['Description'], 'Keywords': df['Keywords'], 'Categories': df['Category'], 'Editorial': 'No', 'Mature content': 'No', 'illustration': 'No'})
+                    dfs.to_csv(os.path.join(csv_dir, "Shutterstock", f"ss_{ts}.csv"), index=False)
+                    
+                    os.makedirs(os.path.join(csv_dir, "Getty"), exist_ok=True)
+                    dfg = pd.DataFrame({'file name': df['New Filename'], 'title': df['Title'], 'description': df['Description'], 'keywords': df['Keywords'], 'country': 'Indonesia', 'brief code': '', 'created date': ''})
+                    dfg.to_csv(os.path.join(csv_dir, "Getty", f"getty_{ts}.csv"), index=False)
+                    
+                    st.balloons()
+                    st.info(f"All reports saved in: `{csv_dir}`")
 
     elif ACTIVE_INPUT_DIR:
         st.warning("Input folder invalid/empty.")
@@ -654,7 +807,7 @@ elif selected_menu == MENU_PROMPT:
             st.code(st.session_state['gen_result'], language="text")
         else: st.info("Result here.")
 
-# ================= PAGE: HISTORY LOG (NEW) =================
+# ================= PAGE: HISTORY LOG =================
 elif selected_menu == MENU_HISTORY:
     st.subheader("Process History Log")
     st.write("Database records of all successfully processed files.")
@@ -668,15 +821,7 @@ elif selected_menu == MENU_HISTORY:
     df_hist = get_history_df()
     if not df_hist.empty:
         st.dataframe(df_hist, use_container_width=True)
-        
-        # Download Master CSV from History
         csv = df_hist.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            "Download Full History (CSV)",
-            csv,
-            "full_history_dump.csv",
-            "text/csv",
-            key='download-csv'
-        )
+        st.download_button("Download Full History (CSV)", csv, "full_history_dump.csv", "text/csv", key='download-csv')
     else:
         st.info("No history records found yet.")
