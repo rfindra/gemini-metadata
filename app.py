@@ -71,7 +71,7 @@ def clear_history():
 
 init_db()
 
-# ================= PRICING DATABASE (DYNAMIC) =================
+# ================= PRICING DATABASE (DYNAMIC) PROVIDER =================
 # Harga per 1 Juta Token (Estimasi USD) - Update sesuai provider
 MODEL_PRICES = {
     # Google
