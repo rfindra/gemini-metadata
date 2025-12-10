@@ -9,11 +9,16 @@ import datetime
 import google.generativeai as genai
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from streamlit_option_menu import option_menu 
+from dotenv import load_dotenv 
 
-# Import Modul Buatan Sendiri (Termasuk DEFAULT_API_KEY yang baru)
+# [FIX] Paksa baca ulang .env setiap kali reload agar update real-time
+load_dotenv(override=True)
+
+# Import Modul Buatan Sendiri
+# NOTE: Jika config.py baru diubah, Anda WAJIB restart terminal (Ctrl+C lalu run lagi)
 from config import (
     MODEL_PRICES, PROMPT_PRESETS, PROVIDERS, 
-    DEFAULT_INTERNAL_OUTPUT, BASE_WORK_DIR, DEFAULT_API_KEY
+    DEFAULT_INTERNAL_OUTPUT, BASE_WORK_DIR
 )
 from database import (
     init_db, 
@@ -38,19 +43,16 @@ st.set_page_config(
 )
 
 # ================= STATE MANAGEMENT =================
-# 1. Init State Defaults
 DEFAULT_PRESET_KEY = "Commercial (Standard) - BEST SELLER"
 if 'active_preset_name' not in st.session_state:
     st.session_state['active_preset_name'] = DEFAULT_PRESET_KEY
     st.session_state['active_title_rule'] = PROMPT_PRESETS[DEFAULT_PRESET_KEY]['title']
     st.session_state['active_desc_rule'] = PROMPT_PRESETS[DEFAULT_PRESET_KEY]['desc']
 
-# 2. Navigation & Path State
 if 'menu_index' not in st.session_state: st.session_state['menu_index'] = 0 
 if 'selected_folder_path' not in st.session_state: st.session_state['selected_folder_path'] = ""
 if 'selected_output_path' not in st.session_state: st.session_state['selected_output_path'] = ""
 
-# Helpers
 def go_to_metadata(): st.session_state['menu_index'] = 1
 def go_to_prompt(): st.session_state['menu_index'] = 2
 
@@ -73,10 +75,8 @@ with st.sidebar:
     st.markdown("<h3 style='text-align: center; color: white;'>✨ Gemini Studio</h3>", unsafe_allow_html=True)
     st.markdown("---")
 
-    # API Key Init (Gunakan Default dari .env jika ada)
-    api_key = DEFAULT_API_KEY 
+    active_api_key = None 
 
-    # MENU UTAMA
     selected_menu = option_menu(
         menu_title=None, 
         options=["Home", "Metadata Auto", "Prompt Architect", "History Log"], 
@@ -106,6 +106,13 @@ with st.sidebar:
             provider_choice = st.selectbox("Provider", list(PROVIDERS.keys()), index=0, label_visibility="collapsed")
             
             current_provider_config = PROVIDERS[provider_choice]
+            
+            # [LOGIC FIX] Ambil Variable Name dari config.py
+            env_var_name = current_provider_config.get("env_var")
+            
+            # Coba ambil value dari .env
+            detected_key = os.getenv(env_var_name) if env_var_name else None
+            
             model_label = st.selectbox("Model", list(current_provider_config["models"].keys()))
             
             if st.checkbox("Use Custom ID"):
@@ -113,9 +120,23 @@ with st.sidebar:
             else:
                 final_model_name = current_provider_config["models"][model_label]
             
-            st.caption("Security")
-            # [OPTIMASI] Value diisi otomatis oleh api_key (dari .env)
-            api_key = st.text_input("API Key", value=api_key if api_key else "", type="password", placeholder="sk-...", label_visibility="collapsed")
+            # INPUT API KEY (Logic Key Unik + Auto Fill)
+            st.caption(f"Security Key")
+            active_api_key = st.text_input(
+                "API Key", 
+                value=detected_key if detected_key else "", 
+                type="password", 
+                placeholder=f"Paste Key Here...", 
+                label_visibility="collapsed",
+                key=f"apikey_{provider_choice}"
+            )
+            
+            # [DEBUG INFO] Memberitahu user status pembacaan .env
+            if env_var_name:
+                if detected_key:
+                    st.caption(f"✅ Loaded from `.env`: `{env_var_name}`")
+                else:
+                    st.warning(f"⚠️ Missing `{env_var_name}` in .env")
 
         if selected_menu == "Metadata Auto":
             with st.expander("⚙️ Processing Logic", expanded=False):
@@ -126,7 +147,6 @@ with st.sidebar:
                 opt_rename = st.checkbox("Auto Rename File", True) 
                 opt_folder = st.checkbox("Auto Folder Sort", True)
 
-    # Footer Controls
     st.markdown("<div style='margin-top: 30px;'></div>", unsafe_allow_html=True)
     c_s1, c_s2 = st.columns(2)
     with c_s1: 
@@ -152,9 +172,8 @@ if selected_menu == "Home":
     with c3:
         with st.container(border=True):
             st.markdown("**🔌 System Status**")
-            # [OPTIMASI] Cek API Key dari env
-            if api_key: st.markdown(":green[**Online & Ready**]")
-            else: st.markdown(":red[**API Key Missing**]")
+            if active_api_key: st.markdown(":green[**Online & Ready**]")
+            else: st.markdown(":red[**Select Provider to Config**]")
 
     st.markdown("### Quick Actions")
     col_nav1, col_nav2 = st.columns(2)
@@ -227,7 +246,7 @@ elif selected_menu == "Metadata Auto":
             with c_lim2: st.metric("Estimated Cost", f"${est_cost_unit * files_limit:.4f}")
 
         files_to_process = local_files[:files_limit]
-        ready = len(files_to_process) > 0 and api_key
+        ready = len(files_to_process) > 0 and active_api_key
 
         if st.button(f"🚀 Start Processing", type="primary", disabled=not ready, use_container_width=True):
             
@@ -255,7 +274,7 @@ elif selected_menu == "Metadata Auto":
             csv_data, gallery_images = [], []
 
             def read_proc(fpath):
-                return process_single_file(os.path.basename(fpath), provider_choice, final_model_name, api_key, base_url, retry_count, opts, prompt_str, ACTIVE_INPUT_DIR, blur_threshold=blur_limit)
+                return process_single_file(os.path.basename(fpath), provider_choice, final_model_name, active_api_key, base_url, retry_count, opts, prompt_str, ACTIVE_INPUT_DIR, blur_threshold=blur_limit)
 
             with ThreadPoolExecutor(max_workers=num_workers) as exe:
                 futures = {exe.submit(read_proc, fp): fp for fp in files_to_process}
@@ -330,11 +349,11 @@ elif selected_menu == "Prompt Architect":
             with c_p2: num_prompts = st.slider("Variations", 1, 10, 3)
             
             st.markdown("---")
-            if st.button("Generate Prompts 🪄", type="primary", use_container_width=True, disabled=not api_key):
+            if st.button("Generate Prompts 🪄", type="primary", use_container_width=True, disabled=not active_api_key):
                 if not idea: st.warning("Enter an idea first.")
                 else:
                     try:
-                        genai.configure(api_key=api_key)
+                        genai.configure(api_key=active_api_key)
                         mod = genai.GenerativeModel(final_model_name)
                         p = f"Role: Expert AI Prompt Engineer. Task: Write {num_prompts} distinct, highly detailed English prompts for '{idea}' in {style} style. Constraints: Return ONLY the raw prompts separated by double newlines. Do not include numbering, labels, introduction, or markdown styling."
                         with st.spinner(f"Generating..."):

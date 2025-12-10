@@ -1,28 +1,22 @@
 import os
 from dotenv import load_dotenv
 
-# Load Environment Variables dari file .env
+# Load Environment Variables
 load_dotenv()
-
-# Ambil API Key Default (Jika ada)
-DEFAULT_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # Path Configuration
 BASE_WORK_DIR = os.getcwd()
 DEFAULT_INTERNAL_OUTPUT = os.path.join(BASE_WORK_DIR, "output")
 DB_FILE = "gemini_history.db"
 
-# Pricing Configuration
+# Pricing Configuration (Estimasi)
 MODEL_PRICES = {
-    "gemini-2.5-flash": {"in": 0.075, "out": 0.30},
-    "gemini-2.5-flash-lite": {"in": 0.0375, "out": 0.15},
-    "gemma-3-27b": {"in": 0.20, "out": 0.20},
-    "gemma-3-12b": {"in": 0.10, "out": 0.10},
+    "default": {"in": 0.10, "out": 0.40},
+    "gemini": {"in": 0.075, "out": 0.30},
+    "gemma": {"in": 0.10, "out": 0.10},
+    "groq": {"in": 0.00, "out": 0.00}, # Groq sering gratis/murah
     "gpt-4o": {"in": 2.50, "out": 10.00},
-    "gpt-4o-mini": {"in": 0.15, "out": 0.60},
-    "claude-3-haiku": {"in": 0.25, "out": 1.25},
-    "sonar": {"in": 1.0, "out": 1.0},
-    "default": {"in": 0.10, "out": 0.40}
+    "claude": {"in": 3.00, "out": 15.00}
 }
 
 # Prompt Presets
@@ -45,10 +39,11 @@ PROMPT_PRESETS = {
     }
 }
 
-# Providers
+# --- PROVIDERS CONFIGURATION (DENGAN MAPPING API KEY) ---
 PROVIDERS = {
     "Google Gemini (Native)": {
         "base_url": None,
+        "env_var": "GOOGLE_API_KEY", # <--- Mapping ke .env
         "models": {
             "Gemma 3 - 27B (High Intelligence)": "gemma-3-27b-it", 
             "Gemma 3 - 12B (Balanced)": "gemma-3-12b-it",
@@ -56,10 +51,31 @@ PROVIDERS = {
             "Gemini 2.5 Flash Lite (Efficiency)": "gemini-2.5-flash-lite",
         }
     },
-    "OpenAI / OpenRouter / Perplexity": {
-        "base_url": "https://openrouter.ai/api/v1",
+    "Groq Cloud": {
+        "base_url": "https://api.groq.com/openai/v1",
+        "env_var": "GROQ_API_KEY", # <--- Mapping ke .env
         "models": {
-            "Auto Detect (Type Manual ID below)": "manual-entry"
+            "Llama 3 70B (Versatile)": "llama3-70b-8192",
+            "Llama 3 8B (Fast)": "llama3-8b-8192",
+            "Mixtral 8x7b": "mixtral-8x7b-32768"
+        }
+    },
+    "OpenRouter (Aggregator)": {
+        "base_url": "https://openrouter.ai/api/v1",
+        "env_var": "OPENROUTER_API_KEY", # <--- Mapping ke .env
+        "models": {
+            "Anthropic Claude 3.5 Sonnet": "anthropic/claude-3.5-sonnet",
+            "Mistral Large": "mistralai/mistral-large",
+            "Auto Detect (Isi Custom ID)": "manual-entry"
+        }
+    },
+    "OpenAI / Perplexity": {
+        "base_url": "https://api.openai.com/v1",
+        "env_var": "OPENAI_API_KEY", # <--- Mapping ke .env
+        "models": {
+            "GPT-4o": "gpt-4o",
+            "GPT-4o Mini": "gpt-4o-mini",
+            "Auto Detect": "manual-entry"
         }
     }
 }
