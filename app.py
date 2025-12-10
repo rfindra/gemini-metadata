@@ -13,6 +13,7 @@ import exiftool
 import cv2
 import subprocess
 import pandas as pd
+import shutil
 import base64
 from PIL import Image, ImageStat
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -260,16 +261,24 @@ def get_analysis_image_path(original_file_path):
         except: return None
     else: return original_file_path
 
-# ================= WORKER PROCESS =================
-def process_single_file(file_data, filename, provider_type, model_name, api_key, base_url, max_retries, options, full_prompt_string, source_dir):
+# ================= WORKER PROCESS (OPTIMIZED MEMORY) =================
+def process_single_file(filename, provider_type, model_name, api_key, base_url, max_retries, options, full_prompt_string, source_dir):
     thread_id = str(time.time()).replace('.', '')
+    
+    # Path Logic
+    source_full_path = os.path.join(source_dir, filename)
     temp_file_name = f"temp_{thread_id}_{filename}"
     working_path = os.path.join(BASE_WORK_DIR, temp_file_name)
+    
     preview_path = None
     optimizer = StockPhotoOptimizer()
     
     try:
-        with open(working_path, "wb") as f: f.write(file_data)
+        # [MEMORY OPTIMIZATION]
+        # Alih-alih membaca ke RAM, kita COPY file dari Source ke Temp (Disk-to-Disk)
+        shutil.copy2(source_full_path, working_path)
+        
+        # Ekstrak preview dari file TEMP
         preview_path = get_analysis_image_path(working_path)
         if not preview_path: raise ValueError("Gagal ekstrak visual file.")
         
@@ -315,6 +324,7 @@ def process_single_file(file_data, filename, provider_type, model_name, api_key,
         elif ext in ['.eps', '.ai']:
              tags_to_write.update({ "IPTC:Headline": title, "IPTC:Keywords": kw })
         
+        # ExifTool bekerja langsung pada file TEMP di disk (Hemat RAM)
         with exiftool.ExifToolHelper() as et:
             et.set_tags(working_path, tags=tags_to_write, params=["-overwrite_original", "-codedcharacterset=utf8"])
         
@@ -323,19 +333,27 @@ def process_single_file(file_data, filename, provider_type, model_name, api_key,
             safe_title = clean_filename(title)
             final_name = f"{safe_title}{ext}"
         
-        with open(working_path, "rb") as f: processed_bytes = f.read()
-        
+        # Return path file temp agar Main Thread bisa memindahkannya (move)
         return {
-            "status": "success", "file": filename, "new_name": final_name, "category": category, 
-            "data": processed_bytes, "meta_title": title, "meta_desc": desc, "meta_kw": ", ".join(kw)
+            "status": "success", 
+            "file": filename, 
+            "new_name": final_name, 
+            "category": category, 
+            "temp_result_path": working_path, # Path ke file hasil
+            "meta_title": title, 
+            "meta_desc": desc, 
+            "meta_kw": ", ".join(kw)
         }
         
     except Exception as e:
+        if os.path.exists(working_path): 
+            try: os.remove(working_path)
+            except: pass
         return {"status": "error", "file": filename, "msg": f"Sys Error: {str(e)}"}
         
     finally:
-        if os.path.exists(working_path): os.remove(working_path)
-        if preview_path and preview_path != working_path and os.path.exists(preview_path): os.remove(preview_path)
+        if preview_path and preview_path != working_path and os.path.exists(preview_path): 
+            os.remove(preview_path)
 
 # ================= UI FRONTEND & STATE =================
 
@@ -472,7 +490,7 @@ elif selected_menu == MENU_METADATA:
     # --- SCANNING LOGIC ---
     ACTIVE_INPUT_DIR = st.session_state['selected_folder_path']
     
-    # Determine Output Directory (User selected OR Default)
+    # Determine Output Directory
     if st.session_state['selected_output_path']:
         ACTIVE_OUTPUT_DIR = st.session_state['selected_output_path']
         output_msg = f"Saving to: `{ACTIVE_OUTPUT_DIR}`"
@@ -514,8 +532,8 @@ elif selected_menu == MENU_METADATA:
             def read_proc(fpath):
                 fname = os.path.basename(fpath)
                 try:
-                    with open(fpath, "rb") as f: d = f.read()
-                    return process_single_file(d, fname, provider_choice, final_model_name, api_key, base_url, 3, opts, prompt_str, ACTIVE_INPUT_DIR)
+                    # PASS FILENAME, NOT DATA (MEMORY OPTIMIZED)
+                    return process_single_file(fname, provider_choice, final_model_name, api_key, base_url, 3, opts, prompt_str, ACTIVE_INPUT_DIR)
                 except Exception as e: return {"status": "error", "file": fname, "msg": str(e)}
 
             with ThreadPoolExecutor(max_workers=num_workers) as exe:
@@ -527,17 +545,24 @@ elif selected_menu == MENU_METADATA:
                             count_ok += 1
                             cat = res['category']
                             fname = res['new_name']
+                            temp_path = res['temp_result_path']
+                            
                             csv_data.append({
                                 "Original Name": res['file'], "New Filename": fname,
                                 "Title": res['meta_title'], "Description": res['meta_desc'],
                                 "Keywords": res['meta_kw'], "Category": cat
                             })
-                            # SAVE TO ACTIVE OUTPUT DIR
+                            
+                            # MOVE FROM TEMP TO FINAL DESTINATION
                             tdir = os.path.join(ACTIVE_OUTPUT_DIR, cat) if opt_folder else ACTIVE_OUTPUT_DIR
                             if not os.path.exists(tdir): os.makedirs(tdir)
+                            final_file_path = os.path.join(tdir, fname)
                             
-                            with open(os.path.join(tdir, fname), "wb") as f: f.write(res['data'])
-                            st.markdown(f"✅ `{res['file']}` -> `{cat}/{fname}`")
+                            try:
+                                shutil.move(temp_path, final_file_path)
+                                st.markdown(f"✅ `{res['file']}` -> `{cat}/{fname}`")
+                            except Exception as e:
+                                st.error(f"Move Error: {e}")
                         else:
                             count_err += 1
                             st.markdown(f"❌ `{res['file']}`: {res['msg']}")
