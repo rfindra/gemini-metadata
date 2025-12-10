@@ -71,7 +71,7 @@ def clear_history():
 
 init_db()
 
-# ================= PRICING DATABASE (DYNAMIC) PROVIDER =================
+# ================= PRICING DATABASE (DYNAMIC) =================
 # Harga per 1 Juta Token (Estimasi USD) - Update sesuai provider
 MODEL_PRICES = {
     # Google
@@ -659,6 +659,15 @@ elif selected_menu == MENU_METADATA:
             
             ready = len(files_to_process) > 0 and api_key
             if st.button(f"Start Process ({len(files_to_process)} Files)", type="primary", disabled=not ready):
+                
+                # --- [TAMBAHAN BARU] Persiapkan Folder DONE ---
+                DONE_DIR = os.path.join(ACTIVE_INPUT_DIR, "done")
+                if not os.path.exists(DONE_DIR):
+                    os.makedirs(DONE_DIR)
+
+                # --- [TAMBAHAN BARU] Timer Start ---
+                start_time_total = time.time()
+
                 log_cont = st.container(height=400, border=True)
                 log_cont.empty()
                 st.toast("Processing...")
@@ -667,6 +676,9 @@ elif selected_menu == MENU_METADATA:
                 with c1: stat_success = st.metric("Success", "0")
                 with c2: stat_fail = st.metric("Fail", "0")
                 with c3: st.metric("Target", str(len(files_to_process)))
+
+                # --- [TAMBAHAN BARU] UI Timer ---
+                time_metric_display = st.empty()
                 
                 c_cost1, c_cost2 = st.columns(2)
                 with c_cost1: metric_tokens = st.empty()
@@ -695,6 +707,20 @@ elif selected_menu == MENU_METADATA:
                 with ThreadPoolExecutor(max_workers=num_workers) as exe:
                     futures = {exe.submit(read_proc, fp): fp for fp in files_to_process}
                     for i, fut in enumerate(as_completed(futures)):
+                        
+                        # --- [TAMBAHAN BARU] Update Logic Timer ---
+                        current_time = time.time()
+                        elapsed = current_time - start_time_total
+                        processed_cnt = i + 1
+                        avg_time = elapsed / processed_cnt
+                        remaining_files = len(files_to_process) - processed_cnt
+                        eta_seconds = avg_time * remaining_files
+                        
+                        time_metric_display.markdown(
+                            f"⏱️ **Time:** {elapsed:.1f}s | 🚀 **Avg:** {avg_time:.1f}s/file | ⏳ **ETA:** {eta_seconds:.1f}s"
+                        )
+                        # ------------------------------------------
+
                         res = fut.result()
                         with log_cont:
                             if res["status"] == "success":
@@ -734,9 +760,21 @@ elif selected_menu == MENU_METADATA:
                                     if temp_xmp and os.path.exists(temp_xmp):
                                         final_xmp_name = os.path.splitext(fname)[0] + ".xmp"
                                         shutil.move(temp_xmp, os.path.join(tdir, final_xmp_name))
-                                        
+                                    
                                     st.markdown(f"✅ `{res['file']}` -> `{cat}/{fname}` (+XMP)")
                                     add_history_entry(res['file'], fname, res['meta_title'], res['meta_desc'], res['meta_kw'], cat, final_file_path)
+
+                                    # --- [TAMBAHAN BARU] Move Original File to DONE ---
+                                    try:
+                                        source_original_path = os.path.join(ACTIVE_INPUT_DIR, res['file'])
+                                        destination_done_path = os.path.join(DONE_DIR, res['file'])
+                                        shutil.move(source_original_path, destination_done_path)
+                                        # (Optional) Log move
+                                        # st.caption(f"moved to done: {res['file']}") 
+                                    except Exception as e_move:
+                                        st.error(f"Gagal memindahkan ke folder done: {e_move}")
+                                    # --------------------------------------------------
+
                                 except Exception as e:
                                     st.error(f"Move Error: {e}")
                             else:
@@ -746,7 +784,7 @@ elif selected_menu == MENU_METADATA:
                         stat_success.metric("Success", count_ok)
                         stat_fail.metric("Fail", count_err)
                 
-                st.success("Batch Complete.")
+                st.success(f"Batch Complete. Total Waktu: {time.time() - start_time_total:.2f} detik.")
                 
                 if gallery_images:
                     with st.expander("✨ Processed Gallery (Preview)", expanded=True):
