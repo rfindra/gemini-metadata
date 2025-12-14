@@ -1,0 +1,30 @@
+# --- Python & Venv ---
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.venv/
+
+# --- Environment Variables (PENTING: Agar API Key tidak bocor) ---
+.env
+.env.local
+
+# --- Project Specific Data ---
+# Folder sampah sementara yang kita buat di config.py
+tmp_processing/
+
+# Folder hasil output (biasanya tidak perlu di-upload)
+output/
+
+# Database SQLite (agar tidak konflik saat pull/push)
+*.db
+gemini_history.db
+
+# File log atau temporary system
+*.log
+.DS_Store
+Thumbs.db
+
+# --- Streamlit ---
+.streamlit/secrets.toml
