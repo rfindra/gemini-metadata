@@ -18,8 +18,8 @@ tmp_processing/
 output/
 
 # Database SQLite (agar tidak konflik saat pull/push)
-*.db
-gemini_history.db
+#*.db
+#gemini_history.db
 
 # File log atau temporary system
 *.log
