@@ -20,9 +20,9 @@ sudo apt-get install -y exiftool ghostscript ffmpeg libgl1 libglib2.0-0 python3-
 
 # 2. Setup Python Virtual Environment
 echo -e "${BLUE}[2/5] Menyiapkan Virtual Environment...${NC}"
-# Hapus venv lama yang rusak/gagal
+# Hapus venv lama jika ada
 if [ -d "venv" ]; then
-    echo "   - Membersihkan instalasi gagal sebelumnya..."
+    echo "   - Membersihkan instalasi lama..."
     rm -rf venv
 fi
 
@@ -42,11 +42,20 @@ echo "   - Venv berhasil dibuat dan diaktifkan."
 echo -e "${BLUE}[3/5] Menginstall Library Python & GPU Support...${NC}"
 pip install --upgrade pip
 
-# Install dependencies
-pip install streamlit opencv-python-headless pillow pandas python-dotenv google-generativeai PyExifTool cupy-cuda12x streamlit-option-menu
+# [FIX] Pastikan 'openai' dan library krusial lainnya ikut terinstall
+if [ -f "requirements.txt" ]; then
+    echo "   - Menginstall dari requirements.txt..."
+    pip install -r requirements.txt
+else
+    echo "   - Menginstall library secara manual..."
+    pip install streamlit opencv-python-headless pillow pandas python-dotenv \
+                google-generativeai PyExifTool cupy-cuda12x streamlit-option-menu \
+                openai watchdog openpyxl
+fi
 
 # 4. Membuat file Shortcut 'run.sh'
 echo -e "${BLUE}[4/5] Membuat shortcut eksekusi internal Linux...${NC}"
+# Menggunakan $(pwd) agar path selalu absolut dan benar saat dipanggil dari luar
 cat <<EOF > run.sh
 #!/bin/bash
 source $(pwd)/venv/bin/activate
@@ -65,6 +74,7 @@ STARTUP_PATH="/mnt/c/Users/$WIN_USER/AppData/Roaming/Microsoft/Windows/Start Men
 if [ -d "$STARTUP_PATH" ]; then
     VBS_FILE="$STARTUP_PATH/StartGeminiMetadata.vbs"
     # Menulis file VBScript agar jalan tanpa jendela CMD (Silent)
+    # Gunakan variabel lingkungan WSL_DISTRO_NAME agar otomatis menyesuaikan distro yang dipakai
     cat <<EOF > "$VBS_FILE"
 Set WinScriptHost = CreateObject("WScript.Shell")
 WinScriptHost.Run "wsl.exe -d $WSL_DISTRO_NAME -u $USER -- bash -c 'cd $(pwd) && ./run.sh'", 0
@@ -73,11 +83,11 @@ EOF
     echo -e "   - Shortcut Windows Startup berhasil dibuat."
     echo -e "   - Lokasi: $VBS_FILE"
 else
-    echo -e "\033[0;33m[WARN] Folder Startup Windows tidak terdeteksi. Shortcut dilewati.\033[0m"
+    echo -e "\033[0;33m[WARN] Folder Startup Windows tidak terdeteksi. Shortcut otomatis dilewati.\033[0m"
 fi
 
 echo -e "${GREEN}==========================================${NC}"
 echo -e "${GREEN}✅ SETUP SELESAI! GEMINI METADATA SIAP.   ${NC}"
 echo -e "Aplikasi akan otomatis berjalan saat Windows startup."
-echo -e "Untuk menjalankan manual, ketik: ${BLUE}./run.sh${NC}"
+echo -e "Untuk menjalankan manual sekarang, ketik: ${BLUE}./run.sh${NC}"
 echo -e "${GREEN}==========================================${NC}"
