@@ -275,7 +275,8 @@ with st.sidebar:
             with st.expander("⚡ Performance", expanded=False):
                 num_workers = st.slider("Max Threads", 1, 10, 1)
                 retry_count = st.slider("Auto Retry", 0, 5, 3)
-                blur_limit = st.slider("Blur Check", 0.0, 200.0, 100.0)
+                # [FIXED] Updated Slider Scale for FFT Score (0-50)
+                blur_limit = st.slider("Min Sharpness (Score)", 0.0, 50.0, 5.0, help="Score < 5.0 is typically blurry.")
                 st.markdown("---")
                 opt_skip = st.checkbox("Skip Processed (Resume)", True)
                 opt_rename = st.checkbox("Auto Rename File", True) 

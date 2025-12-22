@@ -2,157 +2,134 @@ import os
 import time
 import shutil
 import exiftool
+import uuid
+import sys
 from config import BASE_WORK_DIR
 from image_ops import StockPhotoOptimizer, get_analysis_image_path, create_xmp_sidecar, detect_blur
 from ai_engine import run_gemini_engine, run_openai_compatible_engine
 from utils import clean_filename
 
+# --- PORTABLE EXIFTOOL CHECK ---
+def get_exiftool_path():
+    """Mencari ExifTool di folder 'tools' lokal agar portable."""
+    local_tool = os.path.join(os.getcwd(), "tools", "exiftool.exe" if os.name == 'nt' else "exiftool")
+    if os.path.exists(local_tool): return local_tool
+    return None # Fallback ke System PATH
+
 def determine_file_type(filename):
-    ext = os.path.splitext(filename)[1].lower()
-    if ext in ['.jpg', '.jpeg', '.png', '.tiff', '.tif']: return "Photo"
-    if ext in ['.mp4', '.mov', '.avi', '.mkv', '.webm']: return "Video"
+    ext = os.path.splitext(filename)[1].lower().strip()
+    if ext in ['.jpg', '.jpeg', '.png', '.tiff', '.webp']: return "Photo"
+    if ext in ['.mp4', '.mov', '.avi', '.mkv']: return "Video"
     if ext in ['.eps', '.ai', '.svg']: return "Vector"
     return "Other"
 
-def process_single_file(filename, provider_type, model_name, api_key, base_url, max_retries, options, full_prompt_string, source_dir, blur_threshold=0.0):
-    thread_id = str(time.time()).replace('.', '')
+def process_single_file(filename, provider, model, api_key, base_url, max_retries, options, full_prompt, source_dir, blur_threshold=10.0):
+    thread_id = str(uuid.uuid4())[:8]
+    source_path = os.path.join(source_dir, filename)
+    ftype = determine_file_type(filename)
     
-    source_full_path = os.path.join(source_dir, filename)
-    file_type = determine_file_type(filename)
-    
-    if not os.path.exists(source_full_path):
-        return {"status": "error", "file": filename, "msg": "File sumber hilang."}
+    if not os.path.exists(source_path): return {"status": "error", "msg": "File not found"}
 
-    # --- SKIP PROCESSED ---
+    et_path = get_exiftool_path()
+
+    # --- 1. SKIP EXISTING CHECK ---
     if options.get("skip_existing", False):
         try:
-            with exiftool.ExifToolHelper() as et:
-                metadata = et.get_tags(source_full_path, tags=["XMP:Description", "IPTC:Caption-Abstract", "XMP:Subject"])
-                for d in metadata:
+            with exiftool.ExifToolHelper(executable=et_path) as et:
+                meta = et.get_tags(source_path, tags=["XMP:Description", "IPTC:Caption-Abstract"])
+                for d in meta:
                     if "XMP:Description" in d or "IPTC:Caption-Abstract" in d:
-                        return {"status": "skipped", "file": filename, "msg": "Metadata existing."}
+                        return {"status": "skipped", "file": filename, "msg": "Metadata exists"}
         except: pass
 
-    # --- BLUR CHECK ---
-    if file_type == "Photo":
-        is_blurry, blur_score = detect_blur(source_full_path, threshold=blur_threshold)
-        if is_blurry:
-            return {"status": "skipped", "file": filename, "msg": f"Blurry ({blur_score:.1f})"}
-
-    temp_file_name = f"temp_{thread_id}_{filename}"
-    working_path = os.path.join(BASE_WORK_DIR, temp_file_name)
+    # --- 2. SETUP TEMP FILES ---
+    temp_name = f"temp_{thread_id}_{filename}"
+    work_path = os.path.join(BASE_WORK_DIR, temp_name)
+    shutil.copy2(source_path, work_path)
     
-    preview_path = None
-    preview_bytes = None
     optimizer = StockPhotoOptimizer()
+    preview_path = get_analysis_image_path(work_path) # Handle Video/Vector preview
+    if not preview_path: preview_path = work_path
     
-    try:
-        shutil.copy2(source_full_path, working_path)
-        preview_path = get_analysis_image_path(working_path)
+    # --- 3. VISION ANALYSIS & BLUR CHECK ---
+    tech_specs = {"context_str": "", "tags": [], "blur_score": 100}
+    
+    if ftype == "Photo":
+        # --- PERBAIKAN DI SINI ---
+        if options.get("blur_check", True):
+            # Sekarang detect_blur hanya mengembalikan SATU nilai (skor float)
+            blur_score = detect_blur(work_path, threshold=blur_threshold)
+            
+            # Kita tentukan sendiri apakah blur atau tidak berdasarkan threshold
+            if blur_score < blur_threshold:
+                try: os.remove(work_path)
+                except: pass
+                if preview_path != work_path: 
+                    try: os.remove(preview_path)
+                    except: pass
+                return {"status": "skipped", "file": filename, "msg": f"Blurry (Score: {blur_score:.1f})"}
         
-        if not preview_path or not os.path.exists(preview_path):
-            if file_type == "Video":
-                return {"status": "error", "file": filename, "msg": "Gagal extract frame video."}
-            preview_path = working_path 
-        
+        # Analisis mendalam (Background, Orientation, dll)
+        tech_specs = optimizer.analyze_technical_specs(work_path)
+
+    # Inject Context ke Prompt
+    final_prompt = full_prompt + f"\n[TECHNICAL DATA]: {tech_specs['context_str']}"
+    if ftype == "Vector": final_prompt += " This is a Vector Illustration."
+    if ftype == "Video": final_prompt += " This is a Stock Footage."
+
+    # --- 4. AI INFERENCE ---
+    response = None
+    last_err = ""
+    for attempt in range(max_retries + 1):
         try:
-            with open(preview_path, "rb") as fimg:
-                preview_bytes = fimg.read()
+            if attempt > 0: time.sleep(2 * attempt)
+            if provider == "Google Gemini (Native)":
+                response = run_gemini_engine(model, api_key, preview_path, final_prompt)
+            else:
+                response = run_openai_compatible_engine(model, api_key, base_url, preview_path, final_prompt)
+            if response: break
+        except Exception as e: last_err = str(e)
+    
+    if not response:
+        try: os.remove(work_path)
+        except: pass
+        if preview_path != work_path:
+             try: os.remove(preview_path)
+             except: pass
+        return {"status": "error", "file": filename, "msg": f"AI Fail: {last_err}"}
+
+    # --- 5. POST PROCESS & WRITE ---
+    clean_kw = optimizer.clean_and_optimize_tags(response.get("keywords", ""), tech_specs["tags"])
+    title = response.get("title", "").strip()
+    desc = f"{title}. {response.get('description', '')}"[:2000]
+    
+    tags_write = {"XMP:Title": title, "XMP:Description": desc, "XMP:Subject": clean_kw}
+    if ftype == "Photo":
+        tags_write.update({"IPTC:Headline": title, "IPTC:Caption-Abstract": desc, "IPTC:Keywords": clean_kw})
+        
+    try:
+        with exiftool.ExifToolHelper(executable=et_path) as et:
+            et.set_tags(work_path, tags=tags_write, params=["-overwrite_original", "-codedcharacterset=utf8"])
+    except Exception as e: print(f"Exif Error: {e}")
+
+    xmp_path = create_xmp_sidecar(work_path, title, desc, clean_kw)
+    
+    # Rename Logic
+    final_name = filename
+    if options.get("rename", True):
+        ext = os.path.splitext(filename)[1].lower().strip()
+        safe_title = clean_filename(title)[:50]
+        final_name = f"{safe_title}_{str(uuid.uuid4())[:4]}{ext}"
+
+    # Bersihkan file preview jika berbeda dengan file utama
+    if preview_path != work_path and os.path.exists(preview_path):
+        try: os.remove(preview_path)
         except: pass
 
-        tech_specs = optimizer.analyze_technical_specs(preview_path)
-        context_injection = tech_specs['context_str']
-        if file_type == "Vector": context_injection += " This is a Vector Illustration (EPS/AI)."
-        if file_type == "Video": context_injection += " This is a Stock Footage/Video."
-        
-        prompt = full_prompt_string.replace("{context_injection}", context_injection)
-        
-        response_data = None
-        last_error = ""
-        
-        for attempt in range(max_retries + 1): 
-            try:
-                if attempt > 0: time.sleep(2 * attempt)
-                if provider_type == "Google Gemini (Native)":
-                    response_data = run_gemini_engine(model_name, api_key, preview_path, prompt)
-                else:
-                    response_data = run_openai_compatible_engine(model_name, api_key, base_url, preview_path, prompt)
-                if not response_data: raise ValueError("Empty JSON")
-                break 
-            except Exception as e:
-                last_error = str(e)
-                if "429" in last_error: time.sleep(10 + (attempt * 5))
-        
-        if not response_data:
-            return {"status": "error", "file": filename, "msg": f"AI Fail: {last_error}"}
-
-        # --- DATA PROCESSING & MERGING TITLE/DESC ---
-        raw_kw = response_data.get("keywords", "")
-        kw = optimizer.clean_and_optimize_tags(raw_kw, tech_specs["tags"])
-        kw = kw[:49] 
-
-        title = response_data.get("title", "").strip()[:200]
-        raw_desc = response_data.get("description", "").strip()
-        category = response_data.get("category", "Uncategorized")
-        
-        # [MODIFIKASI UTAMA] Gabungkan Title + Mood Description
-        # Pastikan tidak ada titik ganda
-        clean_title = title.rstrip('.')
-        final_desc = f"{clean_title}. {raw_desc}"[:2000] # Gabungkan!
-
-        # --- WRITE METADATA ---
-        tags_to_write = {
-            "XMP:Title": title,
-            "XMP:Description": final_desc, # Gunakan deskripsi gabungan
-            "XMP:Subject": kw
-        }
-
-        if file_type == "Photo":
-            tags_to_write.update({
-                "IPTC:Headline": title, 
-                "IPTC:Caption-Abstract": final_desc, # Gunakan deskripsi gabungan
-                "IPTC:Keywords": kw,
-                "EXIF:XPTitle": title, 
-                "EXIF:XPKeywords": ";".join(kw), 
-                "EXIF:ImageDescription": final_desc # Gunakan deskripsi gabungan
-            })
-        elif file_type == "Vector":
-             tags_to_write.update({ "IPTC:Headline": title, "IPTC:Keywords": kw })
-        
-        try:
-            with exiftool.ExifToolHelper() as et:
-                et.set_tags(working_path, tags=tags_to_write, params=["-overwrite_original", "-codedcharacterset=utf8"])
-        except Exception as e: print(f"Exiftool Warning: {e}")
-
-        temp_xmp_path = create_xmp_sidecar(os.path.splitext(working_path)[0], title, final_desc, kw)
-        
-        final_name = filename
-        if options["rename"]:
-            safe_title = clean_filename(title)
-            ext = os.path.splitext(filename)[1].lower()
-            final_name = f"{safe_title}{ext}"
-        
-        return {
-            "status": "success", 
-            "file": filename, 
-            "new_name": final_name,
-            "file_type": file_type,
-            "category": category, 
-            "temp_result_path": working_path, 
-            "temp_xmp_path": temp_xmp_path, 
-            "meta_title": title, 
-            "meta_desc": final_desc, # Return deskripsi gabungan untuk CSV juga
-            "meta_kw": ", ".join(kw),
-            "preview_bytes": preview_bytes,
-            "tokens_in": 300, "tokens_out": 200
-        }
-        
-    except Exception as e:
-        if os.path.exists(working_path): 
-            try: os.remove(working_path)
-            except: pass
-        return {"status": "error", "file": filename, "msg": f"Sys Error: {str(e)}"}
-        
-    finally:
-        if preview_path and preview_path != working_path and os.path.exists(preview_path): 
-            os.remove(preview_path)
+    return {
+        "status": "success", "file": filename, "new_name": final_name,
+        "file_type": ftype, "category": response.get("category", "Uncategorized"),
+        "temp_result_path": work_path, "temp_xmp_path": xmp_path,
+        "meta_title": title, "meta_desc": desc, "meta_kw": ", ".join(clean_kw),
+        "tokens_in": 0, "tokens_out": 0
+    }
