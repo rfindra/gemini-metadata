@@ -108,19 +108,4 @@ ai_engine.py: Driver komunikasi API AI.
 database.py: Manajemen riwayat proses (SQLite).
 
 utils.py: Helper functions & WSL Windows Bridge.
-
-🖋️ Catatan Pengembangan
-Alat ini dikembangkan untuk meningkatkan efisiensi tugas administratif fotografer profesional melalui otomasi AI, memastikan produktivitas maksimal tanpa mengorbankan kualitas metadata.
-
-Author: Indra (PNS & Tech Enthusiast) Version: 3.1.0 (Stable)
-
-
 ---
-
-**Cara Menyimpan:**
-1. Buka terminal di folder proyek Anda.
-2. Ketik `nano README.md`.
-3. Tempel (Paste) teks di atas.
-4. Simpan dengan `Ctrl+O`, `Enter`, lalu `Ctrl+X`.
-
-Apakah ada bagian teknis lain yang ingin Anda tambahkan ke dalam panduan ini?
