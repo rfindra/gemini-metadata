@@ -8,13 +8,13 @@ from PIL import Image, ImageStat
 try:
     import cupy as cp
     HAS_GPU = True
-    print("🚀 NVIDIA GPU Detected: Acceleration Enabled")
+    print("[INFO] NVIDIA GPU Detected: Acceleration Enabled")
 except ImportError:
     import numpy as cp
     HAS_GPU = False
-    print("⚠️ GPU Not Found: Running on CPU mode")
+    print("[WARN] GPU Not Found: Running on CPU mode")
 
-# --- 2. SPEED OPTIMIZED BLUR DETECTION ---
+# --- 2. SPEED OPTIMIZED BLUR DETECTION (FFT) ---
 
 def calculate_fft_score(img_array, size=30): 
     h, w = img_array.shape
@@ -81,69 +81,49 @@ def detect_blur(image_path, threshold=0.0):
 
     except Exception as e: return 0.0
 
-# --- 3. BACKGROUND SORTING LOGIC (SOLID VS COMPLEX) ---
+# --- 3. BACKGROUND SORTING LOGIC ---
 
 def analyze_background_type(image_path):
-    """
-    Membedakan:
-    1. Isolated White (RGB > 240, Variance Rendah)
-    2. Isolated Black (RGB < 15, Variance Rendah)
-    3. Solid Color (Warna Lain, Variance Rendah) -> INI YANG ANDA CARI
-    4. Complex (Variance Tinggi)
-    """
     try:
-        # Load pakai PIL agar akurasi warna RGB lebih baik drpd OpenCV
         with Image.open(image_path) as img:
             img = img.convert("RGB")
-            # Resize kecil (100px) sangat cukup untuk cek warna & hemat GPU
             img.thumbnail((100, 100)) 
             img_np = np.array(img)
             
         h, w, _ = img_np.shape
-        s = 15 # Ukuran sample sudut
+        s = 15 
 
-        # Ambil sampel dari 4 sudut + Bagian Atas Tengah (Biasanya background)
-        # Kita hindari tengah-tengah persis karena disitu biasanya ada objek
         corners = [
-            img_np[0:s, 0:s],           # Kiri Atas
-            img_np[0:s, w-s:w],         # Kanan Atas
-            img_np[h-s:h, 0:s],         # Kiri Bawah
-            img_np[h-s:h, w-s:w],       # Kanan Bawah
-            img_np[0:s, int(w/2)-5:int(w/2)+5] # Atas Tengah
+            img_np[0:s, 0:s],           
+            img_np[0:s, w-s:w],         
+            img_np[h-s:h, 0:s],         
+            img_np[h-s:h, w-s:w],       
+            img_np[0:s, int(w/2)-5:int(w/2)+5] 
         ]
         
-        # Gabung semua sampel pixel
         samples_cpu = np.concatenate([c.reshape(-1, 3) for c in corners])
 
-        # Hitung Statistik (Pakai GPU jika ada)
         if HAS_GPU:
             samples_gpu = cp.asarray(samples_cpu)
-            # Standar Deviasi: Semakin kecil = Semakin seragam (Solid)
             std_dev = float(cp.std(samples_gpu, axis=0).mean())
-            # Rata-rata Warna
             mean_color = cp.asnumpy(cp.mean(samples_gpu, axis=0))
         else:
             std_dev = np.std(samples_cpu, axis=0).mean()
             mean_color = np.mean(samples_cpu, axis=0)
         
-        # LOGIKA SORTIR
-        # Toleransi 20.0: Angka ini menentukan "toleransi keramaian".
-        # < 20.0 = Background Solid/Bersih
-        # > 20.0 = Background Ramai/Kompleks
         if std_dev < 20.0: 
             if mean_color[0]>240 and mean_color[1]>240 and mean_color[2]>240: 
                 return "Isolated White", "Isolated on white background"
             elif mean_color[0]<20 and mean_color[1]<20 and mean_color[2]<20: 
                 return "Isolated Black", "Isolated on black background"
             else: 
-                # Ini akan menangkap Background Merah, Biru, Hijau, Abu-abu polos
                 return "Solid Color", "Studio shot with solid colored background"
         
         return "Complex", "Natural environment background"
     except: 
         return "Complex", "Natural background"
 
-# --- 4. HELPERS (TETAP) ---
+# --- 4. HELPERS ---
 
 def create_xmp_sidecar(path_without_ext, title, desc, keywords):
     try:
@@ -192,22 +172,16 @@ class StockPhotoOptimizer:
                 elif h > w: specs["tags"].append("vertical")
                 else: specs["tags"].append("square")
 
-            # Analisis Blur
             specs["blur_score"] = detect_blur(image_path)
-            
-            # Analisis Background (Solid/Complex)
             bg_type, bg_desc = analyze_background_type(image_path)
             specs["bg_type"] = bg_type
 
-            # Menyusun Prompt Context agar AI tau ini Solid/Complex
             parts = [f"Background Style: {bg_desc}."]
-            
             if bg_type == "Isolated White": 
                 specs["tags"].extend(["white background", "isolated"])
             elif bg_type == "Isolated Black": 
                 specs["tags"].extend(["black background", "isolated"])
             elif bg_type == "Solid Color":
-                # Keyword penting untuk foto solid
                 specs["tags"].extend(["solid background", "copy space", "studio shot", "minimalist"])
                 parts.append("Key Visual: Minimalist composition with solid color background.")
             
@@ -232,43 +206,69 @@ class StockPhotoOptimizer:
                 final.append(c); seen.add(c)
         return final[:49]
 
-# ... (Kode sebelumnya tetap sama, paste ini di paling bawah) ...
+# --- 6. HYBRID SIMILARITY CHECKER (Structure + Color) ---
 
-# --- 6. SIMILARITY CHECKER (dHash) ---
-
-def compute_dhash(image_path, hash_size=8):
+def compute_dhash(image_path, hash_size=16):
     """
-    Menghitung 'Sidik Jari' (Hash) gambar.
-    Tahan terhadap perubahan ukuran, format, dan sedikit warna.
+    [UPGRADED] Mengembalikan Dictionary berisi Struktur dan Data Warna.
     """
     try:
-        # 1. Convert ke Grayscale
-        # 2. Resize ke (hash_size + 1, hash_size) -> misal 9x8
-        img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+        # 1. Load Image
+        img = cv2.imread(image_path)
         if img is None: return None
         
-        resized = cv2.resize(img, (hash_size + 1, hash_size), interpolation=cv2.INTER_AREA)
+        # 2. Structure Hash (dHash Grayscale 16-bit)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        resized_gray = cv2.resize(gray, (hash_size + 1, hash_size), interpolation=cv2.INTER_AREA)
+        diff = resized_gray[:, 1:] > resized_gray[:, :-1]
+        structure_hash = sum([2 ** i for (i, v) in enumerate(diff.flatten()) if v])
         
-        # 3. Bandingkan pixel bertetangga
-        diff = resized[:, 1:] > resized[:, :-1]
+        # 3. Color Signature (9x9 Low Res Grid - Flattened)
+        # Menggunakan RGB sederhana sudah cukup kuat untuk membedakan Sunset vs Putih
+        resized_color = cv2.resize(img, (9, 9), interpolation=cv2.INTER_AREA)
+        color_sig = resized_color.flatten() # Array panjang (R, G, B, R, G, B...)
         
-        # 4. Convert ke Integer (64-bit hash)
-        return sum([2 ** i for (i, v) in enumerate(diff.flatten()) if v])
+        return {
+            "structure": structure_hash,
+            "color": color_sig
+        }
     except:
         return None
 
-def calculate_similarity_percentage(hash1, hash2):
+def calculate_similarity_percentage(hash1, hash2, hash_size=16):
     """
-    Menghitung persentase kemiripan antara dua hash.
-    Output: 0.0 sampai 100.0
+    Menghitung kemiripan dengan logika VETO.
+    Jika Struktur mirip TAPI Warna beda -> BUKAN Duplikat.
     """
     if hash1 is None or hash2 is None: return 0.0
     
-    # Hitung Hamming Distance (Beda berapa bit?)
-    # XOR hash1 dan hash2, lalu hitung jumlah bit '1'
-    hamming_dist = bin(int(hash1) ^ int(hash2)).count('1')
+    # 1. Cek Struktur (dHash)
+    s1, s2 = hash1["structure"], hash2["structure"]
+    hamming_dist = bin(int(s1) ^ int(s2)).count('1')
+    total_bits = hash_size * hash_size
+    struct_sim = (total_bits - hamming_dist) / total_bits * 100
     
-    # Total bit adalah 64 (karena 8x8)
-    # Similarity = (64 - beda) / 64 * 100
-    similarity = (64 - hamming_dist) / 64 * 100
-    return similarity
+    # Jika struktur sudah sangat berbeda (<70%), langsung return (Optimasi Speed)
+    if struct_sim < 70:
+        return struct_sim
+        
+    # 2. Cek Warna (Hanya jika struktur mirip)
+    c1, c2 = hash1["color"], hash2["color"]
+    
+    # Hitung selisih rata-rata warna (Manhattan Distance)
+    # Semakin kecil dist, semakin mirip
+    dist = np.mean(np.abs(c1 - c2))
+    
+    # Konversi Distance ke Similarity %
+    # Dist 0 = 100% mirip. Dist 50 = Sangat beda.
+    # Rumus empiris: Color Sim = 100 - (dist * 1.5)
+    color_sim = max(0, 100 - (dist * 1.5))
+    
+    # 3. Final Verdict (Hybrid Logic)
+    # Kita ambil nilai TERKECIL di antara Struktur dan Warna.
+    # Contoh Pohon vs Bintang: Struktur 95% (Mirip), Warna 40% (Beda).
+    # Final = 40% (Tidak Duplikat).
+    
+    final_sim = min(struct_sim, color_sim)
+    
+    return final_sim

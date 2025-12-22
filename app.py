@@ -8,7 +8,7 @@ import pandas as pd
 import datetime
 import google.generativeai as genai
 import exiftool 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from streamlit_option_menu import option_menu 
 from dotenv import load_dotenv 
 
@@ -27,8 +27,19 @@ from database import (
 )
 from utils import calculate_cost, select_folder_from_wsl, construct_prompt_template, clean_filename
 from processor import process_single_file
-from image_ops import create_xmp_sidecar
-from ai_engine import run_gemini_engine
+
+# [FIXED IMPORT SECTION]
+from image_ops import create_xmp_sidecar, compute_dhash, calculate_similarity_percentage
+from ai_engine import run_gemini_engine, run_openai_compatible_engine
+
+# [WRAPPER FOR MULTIPROCESSING] - Wajib di Top Level agar CPU Core bisa baca
+def get_file_hash_wrapper(fpath):
+    try:
+        # Fungsi ini otomatis memanggil compute_dhash terbaru (16-bit/High Precision)
+        # yang ada di image_ops.py
+        return fpath, compute_dhash(fpath)
+    except:
+        return fpath, None
 
 # Init Database & Folder
 init_db()
@@ -64,7 +75,7 @@ def prepare_csv_rows(res):
     }
     return row_master, row_adobe, row_getty, row_shutter
 
-# ================= HELPER: REGENERATE METADATA (FITUR KOREKSI + RENAME) =================
+# ================= HELPER: REGENERATE METADATA =================
 def regenerate_metadata_and_rename(file_path, correction_prompt, api_key, model_name, active_rules):
     try:
         base_prompt = construct_prompt_template(active_rules['title'], active_rules['desc'])
@@ -115,7 +126,6 @@ def regenerate_metadata_and_rename(file_path, correction_prompt, api_key, model_
         return False, str(e), None
 
 # ================= HELPER: GALLERY RENDERER =================
-# [FIX] Added 'idx' parameter to make keys unique
 def render_gallery_item(item_data, key_prefix, idx):
     col_img, col_info = st.columns([1, 2])
     
@@ -134,7 +144,6 @@ def render_gallery_item(item_data, key_prefix, idx):
             st.markdown("---")
             st.markdown("#### 🔧 Correction Tool")
             
-            # [FIX] Unique Key using idx
             correction_input = st.text_input("Correction Prompt", key=f"corr_{key_prefix}_{idx}_{item_data['new_name']}")
             
             if st.button("Regenerate Metadata 🔄", key=f"btn_{key_prefix}_{idx}_{item_data['new_name']}"):
@@ -194,6 +203,8 @@ if 'processed_session_count' not in st.session_state: st.session_state['processe
 
 if 'prompt_results_text' not in st.session_state: st.session_state['prompt_results_text'] = ""
 if 'gallery_items' not in st.session_state: st.session_state['gallery_items'] = []
+# [NEW] State untuk list file bersih setelah scan duplikat
+if 'clean_file_list' not in st.session_state: st.session_state['clean_file_list'] = []
 
 def force_navigate(index):
     st.session_state['menu_index'] = index
@@ -275,7 +286,6 @@ with st.sidebar:
             with st.expander("⚡ Performance", expanded=False):
                 num_workers = st.slider("Max Threads", 1, 10, 1)
                 retry_count = st.slider("Auto Retry", 0, 5, 3)
-                # [FIXED] Updated Slider Scale for FFT Score (0-50)
                 blur_limit = st.slider("Min Sharpness (Score)", 0.0, 50.0, 5.0, help="Score < 5.0 is typically blurry.")
                 st.markdown("---")
                 opt_skip = st.checkbox("Skip Processed (Resume)", True)
@@ -351,7 +361,100 @@ elif selected_menu == "Metadata Auto":
         if len(local_files) > 0:
             st.write(f"Found **{len(local_files)}** files ready to process.")
             
-            with st.expander("💰 Cost Estimation Check"):
+            # --- SIMILARITY CHECK GUI ---
+            with st.expander("👯 Similarity & Dedup Check (Save Money)", expanded=True):
+                c_sim1, c_sim2 = st.columns([2, 1])
+                with c_sim1:
+                    sim_threshold = st.slider("Similarity Threshold (%)", 80, 100, 95, help="Jika kemiripan > X%, foto dianggap duplikat.")
+                with c_sim2:
+                    st.write("") # Spacer
+                    st.caption(f"Strictness: {'Sangat Ketat' if sim_threshold==100 else 'Burst/Varian'}")
+
+                if st.button("🔍 Scan for Duplicates First"):
+                    st.session_state['clean_file_list'] = []
+                    
+                    # 1. HASHING PARALEL (True Parallelism - CPU INTENSIVE)
+                    st.info(f"🔥 Burning CPU: Generating hashes for {len(local_files)} files...")
+                    scan_bar = st.progress(0)
+                    progress_text = st.empty()
+                    
+                    results = []
+                    # Menggunakan ProcessPoolExecutor untuk Bypass Python GIL
+                    with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
+                        futures = {executor.submit(get_file_hash_wrapper, f): f for f in local_files}
+                        for i, future in enumerate(as_completed(futures)):
+                            results.append(future.result())
+                            scan_bar.progress((i + 1) / len(local_files))
+                            if i % 10 == 0: progress_text.text(f"Hashed {i+1}/{len(local_files)}...")
+                    
+                    # 2. BANDINGKAN HASH
+                    st.info("🧠 Analyzing similarities...")
+                    results.sort(key=lambda x: x[0])
+
+                    seen_hashes = [] 
+                    duplicates_found = []
+                    clean_list = []
+                    
+                    # Visual Progress Comparison
+                    comp_bar = st.progress(0)
+                    comp_text = st.empty()
+                    unique_cnt = 0
+                    dupe_cnt = 0
+
+                    for i, (fpath, h) in enumerate(results):
+                        is_dupe = False
+                        if h is not None:
+                            for seen_h, seen_f in seen_hashes:
+                                sim = calculate_similarity_percentage(h, seen_h)
+                                if sim >= sim_threshold:
+                                    duplicates_found.append((os.path.basename(fpath), os.path.basename(seen_f), sim))
+                                    is_dupe = True
+                                    dupe_cnt += 1
+                                    break
+                        
+                        if not is_dupe:
+                            if h is not None: seen_hashes.append((h, fpath))
+                            clean_list.append(fpath)
+                            unique_cnt += 1
+                        
+                        if i % 5 == 0:
+                            comp_bar.progress((i + 1) / len(results))
+                            comp_text.text(f"Checking... Unique: {unique_cnt} | Duplicates: {dupe_cnt}")
+                            
+                    st.session_state['clean_file_list'] = clean_list
+                    
+                    # Clear bars
+                    scan_bar.empty(); progress_text.empty(); comp_bar.empty(); comp_text.empty()
+
+                    # Summary Metrics
+                    col_m1, col_m2, col_m3 = st.columns(3)
+                    col_m1.metric("Total Files", len(local_files))
+                    col_m2.metric("Unique (Ready)", len(clean_list))
+                    col_m3.metric("Duplicates (Moved)", len(duplicates_found))
+
+                    # Pindahkan Duplikat
+                    if duplicates_found:
+                        DUPE_DIR = os.path.join(ACTIVE_INPUT_DIR, "duplicates")
+                        if not os.path.exists(DUPE_DIR): os.makedirs(DUPE_DIR)
+                        for fname, origin, score in duplicates_found:
+                            try: 
+                                src = os.path.join(ACTIVE_INPUT_DIR, fname)
+                                dst = os.path.join(DUPE_DIR, fname)
+                                shutil.move(src, dst)
+                            except: pass
+                        st.warning(f"Found & Moved {len(duplicates_found)} duplicates to '/duplicates' folder.")
+                        st.dataframe(pd.DataFrame(duplicates_found, columns=["Duplicate File", "Original Ref", "Similarity %"]), hide_index=True)
+                    else:
+                        st.success("No duplicates found! All files are unique.")
+
+            # --- PREPARE FILE LIST ---
+            files_to_process_source = st.session_state.get('clean_file_list')
+            if not files_to_process_source: files_to_process_source = local_files
+
+            st.markdown("---")
+            st.markdown(f"#### Ready to AI Process: **{len(files_to_process_source)}** files")
+            
+            with st.expander("💰 Final Cost Estimation"):
                 input_est, output_est = 558, 200
                 curr_price = MODEL_PRICES["default"]
                 for k in MODEL_PRICES:
@@ -360,8 +463,8 @@ elif selected_menu == "Metadata Auto":
                 
                 c_lim1, c_lim2 = st.columns(2)
                 with c_lim1:
-                    if len(local_files) > 1:
-                        files_limit = st.slider("Limit Processing Amount", 1, len(local_files), len(local_files))
+                    if len(files_to_process_source) > 1:
+                        files_limit = st.slider("Limit Processing Amount", 1, len(files_to_process_source), len(files_to_process_source))
                     else:
                         st.text_input("Processing Amount", value="1", disabled=True)
                         files_limit = 1
@@ -396,9 +499,10 @@ elif selected_menu == "Metadata Auto":
                 def read_proc(fpath):
                     return process_single_file(os.path.basename(fpath), provider_choice, final_model_name, active_api_key, base_url, retry_count, opts, prompt_str, ACTIVE_INPUT_DIR, blur_threshold=blur_limit)
 
-                files_to_process = local_files[:files_limit]
+                files_to_run = files_to_process_source[:files_limit]
+                
                 with ThreadPoolExecutor(max_workers=num_workers) as exe:
-                    futures = {exe.submit(read_proc, fp): fp for fp in files_to_process}
+                    futures = {exe.submit(read_proc, fp): fp for fp in files_to_run}
                     
                     for i, fut in enumerate(as_completed(futures)):
                         res = fut.result()
@@ -441,7 +545,7 @@ elif selected_menu == "Metadata Auto":
                                 st.warning(f"⚠️ Skipped: {res['file']}")
                             else: 
                                 cnt_fail += 1; st.error(f"❌ {res['file']}: {res['msg']}")
-                        prog_bar.progress(processed / len(files_to_process))
+                        prog_bar.progress(processed / len(files_to_process_source))
 
                 if data_master:
                     ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
