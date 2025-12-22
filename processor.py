@@ -48,19 +48,17 @@ def process_single_file(filename, provider, model, api_key, base_url, max_retrie
     shutil.copy2(source_path, work_path)
     
     optimizer = StockPhotoOptimizer()
-    preview_path = get_analysis_image_path(work_path) # Handle Video/Vector preview
+    preview_path = get_analysis_image_path(work_path) 
     if not preview_path: preview_path = work_path
     
     # --- 3. VISION ANALYSIS & BLUR CHECK ---
-    tech_specs = {"context_str": "", "tags": [], "blur_score": 100}
+    tech_specs = {"context_str": "", "tags": [], "blur_score": 100, "bg_type": "Complex"}
     
     if ftype == "Photo":
-        # --- PERBAIKAN DI SINI ---
         if options.get("blur_check", True):
-            # Sekarang detect_blur hanya mengembalikan SATU nilai (skor float)
+            # Cek Blur (Logic baru dari image_ops)
             blur_score = detect_blur(work_path, threshold=blur_threshold)
             
-            # Kita tentukan sendiri apakah blur atau tidak berdasarkan threshold
             if blur_score < blur_threshold:
                 try: os.remove(work_path)
                 except: pass
@@ -69,7 +67,7 @@ def process_single_file(filename, provider, model, api_key, base_url, max_retrie
                     except: pass
                 return {"status": "skipped", "file": filename, "msg": f"Blurry (Score: {blur_score:.1f})"}
         
-        # Analisis mendalam (Background, Orientation, dll)
+        # Analisis Background, Orientasi, dll
         tech_specs = optimizer.analyze_technical_specs(work_path)
 
     # Inject Context ke Prompt
@@ -98,10 +96,19 @@ def process_single_file(filename, provider, model, api_key, base_url, max_retrie
              except: pass
         return {"status": "error", "file": filename, "msg": f"AI Fail: {last_err}"}
 
-    # --- 5. POST PROCESS & WRITE ---
+    # --- 5. POST PROCESS ---
     clean_kw = optimizer.clean_and_optimize_tags(response.get("keywords", ""), tech_specs["tags"])
     title = response.get("title", "").strip()
     desc = f"{title}. {response.get('description', '')}"[:2000]
+    
+    # [LOGIKA PINTAR SORTIR FOLDER]
+    # Jika background 'Solid' atau 'Isolated', kita paksa foldernya sesuai background.
+    # Jika background 'Complex', biarkan foldernya sesuai kategori AI (misal: Business, Food).
+    detected_bg = tech_specs.get("bg_type", "Complex")
+    if detected_bg in ["Isolated White", "Isolated Black", "Solid Color"]:
+        final_category = detected_bg # Masuk folder: Output/Photo/Isolated White
+    else:
+        final_category = response.get("category", "Uncategorized") # Masuk folder: Output/Photo/Business
     
     tags_write = {"XMP:Title": title, "XMP:Description": desc, "XMP:Subject": clean_kw}
     if ftype == "Photo":
@@ -121,14 +128,14 @@ def process_single_file(filename, provider, model, api_key, base_url, max_retrie
         safe_title = clean_filename(title)[:50]
         final_name = f"{safe_title}_{str(uuid.uuid4())[:4]}{ext}"
 
-    # Bersihkan file preview jika berbeda dengan file utama
     if preview_path != work_path and os.path.exists(preview_path):
         try: os.remove(preview_path)
         except: pass
 
     return {
         "status": "success", "file": filename, "new_name": final_name,
-        "file_type": ftype, "category": response.get("category", "Uncategorized"),
+        "file_type": ftype, 
+        "category": final_category, # <--- INI KUNCINYA
         "temp_result_path": work_path, "temp_xmp_path": xmp_path,
         "meta_title": title, "meta_desc": desc, "meta_kw": ", ".join(clean_kw),
         "tokens_in": 0, "tokens_out": 0
