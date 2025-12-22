@@ -28,3 +28,6 @@ Thumbs.db
 
 # --- Streamlit ---
 .streamlit/secrets.toml
+
+# database history
+gemini_history.db

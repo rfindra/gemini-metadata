@@ -4,21 +4,16 @@ from dotenv import load_dotenv
 # Load Environment Variables
 load_dotenv()
 
-# --- Path Configuration (UPDATED) ---
-# Menggunakan folder khusus 'tmp_processing' agar file sampah tidak mengotori root
+# --- Path Configuration ---
 BASE_WORK_DIR = os.path.join(os.getcwd(), "tmp_processing")
 
-# Buat folder tmp_processing otomatis jika belum ada
 if not os.path.exists(BASE_WORK_DIR):
     try:
         os.makedirs(BASE_WORK_DIR)
     except Exception as e:
         print(f"Warning: Gagal membuat folder temp: {e}")
 
-# Folder output tetap di root agar mudah ditemukan user
 DEFAULT_INTERNAL_OUTPUT = os.path.join(os.getcwd(), "output")
-
-# Database tetap di root
 DB_FILE = "gemini_history.db"
 
 # Pricing Configuration (Estimasi per 1M token)
@@ -32,43 +27,71 @@ MODEL_PRICES = {
     "claude": {"in": 3.00, "out": 15.00}
 }
 
-# Prompt Presets
+# --- Prompt Presets (UPDATED WITH SAFETY & QUALITY) ---
 PROMPT_PRESETS = {
     "Commercial (Standard) - BEST SELLER": {
-        "title": "Commercial Title: Subject + Main Action + Specific Context. Max 15 words. Literal and precise.",
-        "desc": "Atmosphere Description: Describe the lighting, mood, environment, background, and color palette. Do NOT repeat the subject action. Max 30 words."
+        "title": "Stock Title: 5-15 words. Literal and precise.",
+        "desc": "Analysis: Quality Score 1-10 & IP Safety Check (Logos/Trademarks).",
+        "full_instruction": """
+        Role: Expert Stock Photographer & Intellectual Property Lawyer.
+        Task: Analyze the image for premium commercial stock agencies (Adobe Stock/Shutterstock).
+        
+        Requirements:
+        1. SAFETY CHECK: Scan for visible trademarks, brand logos, copyrighted art, or recognizable private property.
+           - If found, list them in 'safety_check'.
+           - If none, write 'CLEAN'.
+        2. QUALITY SCORE: Rate the commercial appeal (1-10) based on composition, lighting, and marketability.
+        3. METADATA: Provide a literal Title (max 15 words) and 40-50 Keywords sorted by relevance.
+        
+        Output MUST be in valid JSON format:
+        {
+          "title": "...",
+          "description": "...",
+          "keywords": ["keyword1", "keyword2"],
+          "category": "...",
+          "safety_check": "...",
+          "quality_score": 0.0
+        }
+        """
     },
     "Microstock Specialist (Shutterstock/Adobe)": {
-        "title": "Stock Title: 5-10 words describing exactly WHAT is in the image (Who, What, Where). No flowery language.",
-        "desc": "Stock Details: Describe the surroundings, time of day, lighting quality (e.g., soft light, golden hour), and emotional tone. Do NOT repeat the title."
+        "title": "Stock Title: 5-10 words describing Who, What, Where.",
+        "desc": "Focus: Commercial demand and high-relevance keywords."
     },
     "Editorial (News/Journalism)": {
-        "title": "Editorial Title: Subject + Event/Action + Location + Date (Generic). Factual.",
-        "desc": "Contextual Description: Describe the background scene, crowd atmosphere, and environmental details strictly factually."
+        "title": "Editorial Title: Factual Subject + Event + Location.",
+        "desc": "Focus: Accuracy, news value, and strict factual description."
     },
     "Creative / Abstract / Backgrounds": {
-        "title": "Abstract Title: The main concept, texture, or pattern name.",
-        "desc": "Visual Description: Describe the color gradients, artistic style, geometric shapes, and feelings invoked."
+        "title": "Abstract Title: Texture, pattern, or conceptual name.",
+        "desc": "Focus: Artistic style, color gradients, and geometric shapes."
     },
     "Technical / Minimalist (Isolated)": {
-        "title": "Technical Title: Main Object Name + View Angle (e.g., Top View) + Background (e.g., White Background).",
-        "desc": "Technical Details: Describe the isolation technique, shadows, material texture, and clarity."
+        "title": "Technical Title: Object Name + View Angle + Background Type.",
+        "desc": "Focus: Material texture, shadow detail, and technical clarity."
     }
 }
 
-# --- PROVIDERS CONFIGURATION ---
+# --- PROVIDERS CONFIGURATION (Sesuai Quota Anda) ---
 PROVIDERS = {
     "Google Gemini (Native)": {
         "base_url": None,
         "env_var": "GOOGLE_API_KEY", 
         "models": {
-            "Gemma 3 - 27B IT (High Intelligence)": "gemma-3-27b-it",
-            "Gemma 3 - 12B IT (Balanced)": "gemma-3-12b-it",
-            "Gemma 3 - 4B IT (Speed/Edge)": "gemma-3-4b-it",
-            "Gemini 2.0 Flash Exp (Newest)": "gemini-2.0-flash-exp",
-            "Gemini Exp 1206 (Experimental)": "gemini-exp-1206",
-            "Gemini 1.5 Flash (Stable)": "gemini-1.5-flash",
-            "Gemini 1.5 Pro (Reasoning)": "gemini-1.5-pro",
+            # Model High Quota (14.400 RPD) - Gunakan untuk Batch besar
+            "Gemma 3 - 27B IT": "gemma-3-27b-it", # Perbaikan: Tambah -it
+            "Gemma 3 - 12B IT": "gemma-3-12b-it", # Perbaikan: Tambah -it
+            
+            # Model Vision Terbaru (Kualitas Metadata Terbaik)
+            "Gemini 2.0 Flash": "gemini-2.0-flash", 
+            "Gemini 2.5 Flash": "gemini-2.5-flash",
+            
+            # Model Experimental (Sangat Cerdas tapi kuota sedikit)
+            "Gemini 3 Flash Preview": "gemini-3-flash-preview", # Perbaikan: Tambah -preview
+            "Gemini 3 Pro Preview": "gemini-3-pro-preview",     # Perbaikan: Tambah -preview
+            
+            # Kuda Beban Stabil (Paling direkomendasikan untuk stock photo)
+            "Gemini 1.5 Flash (Legacy)": "gemini-1.5-flash"
         }
     },
     "Groq Cloud": {
