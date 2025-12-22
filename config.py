@@ -72,19 +72,26 @@ PROMPT_PRESETS = {
     }
 }
 
-# --- PROVIDERS CONFIGURATION ---
+# --- PROVIDERS CONFIGURATION (Sesuai Quota Anda) ---
 PROVIDERS = {
     "Google Gemini (Native)": {
         "base_url": None,
         "env_var": "GOOGLE_API_KEY", 
         "models": {
-            "Gemma 3 - 27B IT (Powerful Open)": "gemma-3-27b", # NEW!
-            "Gemini 3 Flash (Latest & Fast)": "gemini-3-flash", # NEW!
-            "Gemini 2.5 Flash (Stable)": "gemini-2.5-flash",   # NEW!
-            "Gemini 2.5 Flash Lite": "gemini-2.5-flash-lite", # NEW!
-            "Gemma 3 - 27B IT (Powerful Open)": "gemma-3-27b", # NEW!
-            "Gemma 3 - 12B IT (Balanced)": "gemma-3-12b",      # NEW!
-            "Gemma 3 - 4B IT (Lightweight)": "gemma-3-4b",    # NEW!
+            # Model High Quota (14.400 RPD) - Gunakan untuk Batch besar
+            "Gemma 3 - 27B IT": "gemma-3-27b-it", # Perbaikan: Tambah -it
+            "Gemma 3 - 12B IT": "gemma-3-12b-it", # Perbaikan: Tambah -it
+            
+            # Model Vision Terbaru (Kualitas Metadata Terbaik)
+            "Gemini 2.0 Flash": "gemini-2.0-flash", 
+            "Gemini 2.5 Flash": "gemini-2.5-flash",
+            
+            # Model Experimental (Sangat Cerdas tapi kuota sedikit)
+            "Gemini 3 Flash Preview": "gemini-3-flash-preview", # Perbaikan: Tambah -preview
+            "Gemini 3 Pro Preview": "gemini-3-pro-preview",     # Perbaikan: Tambah -preview
+            
+            # Kuda Beban Stabil (Paling direkomendasikan untuk stock photo)
+            "Gemini 1.5 Flash (Legacy)": "gemini-1.5-flash"
         }
     },
     "Groq Cloud": {
