@@ -134,27 +134,62 @@ def create_xmp_sidecar(path_without_ext, title, desc, keywords):
         return f"{path_without_ext}.xmp"
     except: return None
 
+# [UPDATED] Fungsi ini sekarang me-resize gambar besar sebelum dikirim ke AI
 def get_analysis_image_path(original_file_path):
-    ext = os.path.splitext(original_file_path)[1].lower()
-    temp_img_path = original_file_path + "_preview.jpg"
-    if ext in ['.mp4', '.mov', '.avi', '.mkv']:
-        try:
+    """
+    Menyiapkan 'Mata' untuk AI.
+    - Video/Vector: Ambil frame/convert.
+    - Foto Besar (>1024px): Resize ke 1024px (Preview).
+    - Foto Kecil: Pakai asli.
+    """
+    try:
+        ext = os.path.splitext(original_file_path)[1].lower()
+        temp_img_path = original_file_path + "_preview.jpg"
+        
+        # 1. Handle VIDEO (Ambil Frame Tengah)
+        if ext in ['.mp4', '.mov', '.avi', '.mkv']:
             cap = cv2.VideoCapture(original_file_path)
             total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             cap.set(cv2.CAP_PROP_POS_FRAMES, total // 2 if total > 0 else 0)
             ret, frame = cap.read()
             cap.release()
             if ret:
-                cv2.imwrite(temp_img_path, frame)
+                # Resize frame video jika terlalu besar
+                h, w, _ = frame.shape
+                if w > 1024:
+                    scale = 1024 / w
+                    frame = cv2.resize(frame, (1024, int(h * scale)))
+                cv2.imwrite(temp_img_path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
                 return temp_img_path
-        except: pass
-    elif ext in ['.eps', '.ai']:
-        try:
+            return None
+
+        # 2. Handle VECTOR (Convert ke JPG pakai Ghostscript)
+        elif ext in ['.eps', '.ai']:
             args = ["gs", "-dNOPAUSE", "-dBATCH", "-sDEVICE=jpeg", "-dEPSCrop", "-r150", f"-sOutputFile={temp_img_path}", original_file_path]
             subprocess.run(args, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             if os.path.exists(temp_img_path): return temp_img_path
-        except: pass
-    return original_file_path
+            return None
+
+        # 3. Handle FOTO BIASA (Resize ke 1024px max)
+        else:
+            with Image.open(original_file_path) as img:
+                # Convert ke RGB (jika CMYK/RGBA) agar bisa di-save sebagai JPEG
+                if img.mode not in ('L', 'RGB'):
+                    img = img.convert('RGB')
+                
+                # Cek ukuran, jika lebar/tinggi > 1024px, kecilkan!
+                w, h = img.size
+                if w > 1024 or h > 1024:
+                    img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+                    img.save(temp_img_path, "JPEG", quality=80)
+                    return temp_img_path
+                else:
+                    # Jika sudah kecil, tetap return path asli (biar gak menuhin storage)
+                    return original_file_path
+
+    except Exception as e:
+        print(f"[WARN] Gagal membuat preview: {e}")
+        return original_file_path # Fallback ke file asli jika gagal
 
 # --- 5. MAIN CLASS ---
 
@@ -224,7 +259,6 @@ def compute_dhash(image_path, hash_size=16):
         structure_hash = sum([2 ** i for (i, v) in enumerate(diff.flatten()) if v])
         
         # 3. Color Signature (9x9 Low Res Grid - Flattened)
-        # Menggunakan RGB sederhana sudah cukup kuat untuk membedakan Sunset vs Putih
         resized_color = cv2.resize(img, (9, 9), interpolation=cv2.INTER_AREA)
         color_sig = resized_color.flatten() # Array panjang (R, G, B, R, G, B...)
         
@@ -254,21 +288,12 @@ def calculate_similarity_percentage(hash1, hash2, hash_size=16):
         
     # 2. Cek Warna (Hanya jika struktur mirip)
     c1, c2 = hash1["color"], hash2["color"]
-    
-    # Hitung selisih rata-rata warna (Manhattan Distance)
-    # Semakin kecil dist, semakin mirip
     dist = np.mean(np.abs(c1 - c2))
     
     # Konversi Distance ke Similarity %
-    # Dist 0 = 100% mirip. Dist 50 = Sangat beda.
-    # Rumus empiris: Color Sim = 100 - (dist * 1.5)
     color_sim = max(0, 100 - (dist * 1.5))
     
     # 3. Final Verdict (Hybrid Logic)
-    # Kita ambil nilai TERKECIL di antara Struktur dan Warna.
-    # Contoh Pohon vs Bintang: Struktur 95% (Mirip), Warna 40% (Beda).
-    # Final = 40% (Tidak Duplikat).
-    
     final_sim = min(struct_sim, color_sim)
     
     return final_sim
