@@ -1,20 +1,28 @@
+# processor.py (Final Optimized: RAM Processing & Custom Temp Support)
 import os
 import time
 import shutil
-import exiftool
 import uuid
-import sys
+import io
+import gc
+import cv2
+import numpy as np
+from PIL import Image
+
+# Import modules
 from config import BASE_WORK_DIR
-from image_ops import StockPhotoOptimizer, get_analysis_image_path, create_xmp_sidecar, detect_blur
+from image_ops import create_xmp_sidecar
 from ai_engine import run_gemini_engine, run_openai_compatible_engine
 from utils import clean_filename
 
-# --- PORTABLE EXIFTOOL CHECK ---
-def get_exiftool_path():
-    """Mencari ExifTool di folder 'tools' lokal agar portable."""
-    local_tool = os.path.join(os.getcwd(), "tools", "exiftool.exe" if os.name == 'nt' else "exiftool")
-    if os.path.exists(local_tool): return local_tool
-    return None # Fallback ke System PATH
+# --- HELPER: In-Memory Blur ---
+def detect_blur_in_memory(cv2_image, threshold=5.0):
+    try:
+        if cv2_image is None: return 0.0
+        if len(cv2_image.shape) == 3: gray = cv2.cvtColor(cv2_image, cv2.COLOR_BGR2GRAY)
+        else: gray = cv2_image
+        return cv2.Laplacian(gray, cv2.CV_64F).var()
+    except: return 0.0
 
 def determine_file_type(filename):
     ext = os.path.splitext(filename)[1].lower().strip()
@@ -23,120 +31,204 @@ def determine_file_type(filename):
     if ext in ['.eps', '.ai', '.svg']: return "Vector"
     return "Other"
 
-def process_single_file(filename, provider, model, api_key, base_url, max_retries, options, full_prompt, source_dir, blur_threshold=10.0):
+# --- MAIN PROCESSOR (Metadata Generator Only) ---
+# [FIXED] Parameter custom_temp_dir sudah ditambahkan dengan benar di sini
+def process_single_file(filename, provider, model, api_key, base_url, max_retries, options, full_prompt, source_dir, custom_temp_dir=None, blur_threshold=10.0):
     thread_id = str(uuid.uuid4())[:8]
     source_path = os.path.join(source_dir, filename)
     ftype = determine_file_type(filename)
     
-    if not os.path.exists(source_path): return {"status": "error", "msg": "File not found"}
-
-    et_path = get_exiftool_path()
-
-    # --- 1. SKIP EXISTING CHECK ---
-    if options.get("skip_existing", False):
-        try:
-            with exiftool.ExifToolHelper(executable=et_path) as et:
-                meta = et.get_tags(source_path, tags=["XMP:Description", "IPTC:Caption-Abstract"])
-                for d in meta:
-                    if "XMP:Description" in d or "IPTC:Caption-Abstract" in d:
-                        return {"status": "skipped", "file": filename, "msg": "Metadata exists"}
-        except: pass
-
-    # --- 2. SETUP TEMP FILES ---
-    temp_name = f"temp_{thread_id}_{filename}"
-    work_path = os.path.join(BASE_WORK_DIR, temp_name)
-    shutil.copy2(source_path, work_path)
+    # Tentukan folder kerja (RAMDisk atau Default) untuk file temporary Video/Vector
+    # Jika user memilih folder manual di App, gunakan itu.
+    working_dir = custom_temp_dir if custom_temp_dir and os.path.exists(custom_temp_dir) else BASE_WORK_DIR
     
-    optimizer = StockPhotoOptimizer()
-    preview_path = get_analysis_image_path(work_path) 
-    if not preview_path: preview_path = work_path
+    # Preview Path (Hanya dipakai jika terpaksa, misal Vector/Video)
+    preview_filename = f"ai_preview_{thread_id}.jpg"
+    preview_path = os.path.join(working_dir, preview_filename)
     
-    # --- 3. VISION ANALYSIS & BLUR CHECK ---
-    tech_specs = {"context_str": "", "tags": [], "blur_score": 100, "bg_type": "Complex"}
-    
-    if ftype == "Photo":
-        if options.get("blur_check", True):
-            # Cek Blur (Logic baru dari image_ops)
-            blur_score = detect_blur(work_path, threshold=blur_threshold)
-            
-            if blur_score < blur_threshold:
-                try: os.remove(work_path)
-                except: pass
-                if preview_path != work_path: 
-                    try: os.remove(preview_path)
-                    except: pass
-                return {"status": "skipped", "file": filename, "msg": f"Blurry (Score: {blur_score:.1f})"}
-        
-        # Analisis Background, Orientasi, dll
-        tech_specs = optimizer.analyze_technical_specs(work_path)
+    if not os.path.exists(source_path): 
+        return {"status": "error", "msg": "File not found"}
 
-    # Inject Context ke Prompt
-    final_prompt = full_prompt + f"\n[TECHNICAL DATA]: {tech_specs['context_str']}"
-    if ftype == "Vector": final_prompt += " This is a Vector Illustration."
-    if ftype == "Video": final_prompt += " This is a Stock Footage."
-
-    # --- 4. AI INFERENCE ---
-    response = None
-    last_err = ""
-    for attempt in range(max_retries + 1):
-        try:
-            if attempt > 0: time.sleep(2 * attempt)
-            if provider == "Google Gemini (Native)":
-                response = run_gemini_engine(model, api_key, preview_path, final_prompt)
-            else:
-                response = run_openai_compatible_engine(model, api_key, base_url, preview_path, final_prompt)
-            if response: break
-        except Exception as e: last_err = str(e)
-    
-    if not response:
-        try: os.remove(work_path)
-        except: pass
-        if preview_path != work_path:
-             try: os.remove(preview_path)
-             except: pass
-        return {"status": "error", "file": filename, "msg": f"AI Fail: {last_err}"}
-
-    # --- 5. POST PROCESS ---
-    clean_kw = optimizer.clean_and_optimize_tags(response.get("keywords", ""), tech_specs["tags"])
-    title = response.get("title", "").strip()
-    desc = f"{title}. {response.get('description', '')}"[:2000]
-    
-    # [LOGIKA PINTAR SORTIR FOLDER]
-    # Jika background 'Solid' atau 'Isolated', kita paksa foldernya sesuai background.
-    # Jika background 'Complex', biarkan foldernya sesuai kategori AI (misal: Business, Food).
-    detected_bg = tech_specs.get("bg_type", "Complex")
-    if detected_bg in ["Isolated White", "Isolated Black", "Solid Color"]:
-        final_category = detected_bg # Masuk folder: Output/Photo/Isolated White
-    else:
-        final_category = response.get("category", "Uncategorized") # Masuk folder: Output/Photo/Business
-    
-    tags_write = {"XMP:Title": title, "XMP:Description": desc, "XMP:Subject": clean_kw}
-    if ftype == "Photo":
-        tags_write.update({"IPTC:Headline": title, "IPTC:Caption-Abstract": desc, "IPTC:Keywords": clean_kw})
-        
     try:
-        with exiftool.ExifToolHelper(executable=et_path) as et:
-            et.set_tags(work_path, tags=tags_write, params=["-overwrite_original", "-codedcharacterset=utf8"])
-    except Exception as e: print(f"Exif Error: {e}")
+        # --- 1. SMART LOADING (RAM Optimized) ---
+        ai_input_data = None 
+        tech_specs = {"context_str": "", "tags": [], "bg_type": "Complex"}
+        
+        # [ALUR FOTO - RAM MODE] -> 100% RAM, SSD Adem
+        if ftype == "Photo":
+            with open(source_path, "rb") as f: file_bytes = f.read()
+            img_pil = Image.open(io.BytesIO(file_bytes)).convert("RGB")
+            
+            # Blur Check (Di RAM)
+            if options.get("blur_check", True):
+                img_np = np.array(img_pil) 
+                img_cv2 = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+                blur_score = detect_blur_in_memory(img_cv2)
+                
+                if blur_score < blur_threshold:
+                    del file_bytes, img_pil, img_np, img_cv2
+                    gc.collect()
+                    return {"status": "skipped", "file": filename, "msg": f"Blurry (Score: {blur_score:.1f})"}
+                del img_np, img_cv2 
+            
+            # Resize (Di RAM)
+            img_pil.thumbnail((1024, 1024))
+            
+            # Save ke Buffer Memory (Bukan ke SSD!)
+            img_byte_arr = io.BytesIO()
+            img_pil.save(img_byte_arr, format="JPEG", quality=80)
+            ai_input_data = img_byte_arr.getvalue() # Raw bytes untuk dikirim ke AI
+            
+            # Tech Specs
+            w, h = img_pil.size
+            if w > h: tech_specs["tags"].append("horizontal")
+            elif h > w: tech_specs["tags"].append("vertical")
+            
+            del file_bytes, img_pil, img_byte_arr
+            gc.collect()
 
-    xmp_path = create_xmp_sidecar(work_path, title, desc, clean_kw)
-    
-    # Rename Logic
-    final_name = filename
-    if options.get("rename", True):
-        ext = os.path.splitext(filename)[1].lower().strip()
-        safe_title = clean_filename(title)[:50]
-        final_name = f"{safe_title}_{str(uuid.uuid4())[:4]}{ext}"
+        # [ALUR VIDEO - Disk Mode] (Video tetap butuh temp file karena OpenCV)
+        # TAPI: Jika 'working_dir' diarahkan ke RAMDisk, ini jadi 100% RAM juga!
+        elif ftype == "Video":
+            cap = cv2.VideoCapture(source_path)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            cap.set(cv2.CAP_PROP_POS_FRAMES, total_frames // 2)
+            ret, frame = cap.read()
+            cap.release()
+            
+            if not ret: return {"status": "error", "file": filename, "msg": "Video corrupt"}
+            
+            h, w, _ = frame.shape
+            if w > 1024:
+                scale = 1024 / w
+                frame = cv2.resize(frame, (1024, int(h * scale)))
+            
+            # Encode langsung ke Memory jika bisa
+            success, encoded_img = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+            if success:
+                ai_input_data = encoded_img.tobytes()
+                tech_specs["context_str"] = "This is a Stock Footage/Video."
+            
+            del frame, encoded_img
+            gc.collect()
 
-    if preview_path != work_path and os.path.exists(preview_path):
-        try: os.remove(preview_path)
-        except: pass
+        # [ALUR VECTOR - Disk Mode] (Ghostscript butuh file input/output)
+        # Jika 'working_dir' adalah RAMDisk, ini aman untuk SSD.
+        elif ftype == "Vector":
+            import subprocess
+            args = ["gs", "-dNOPAUSE", "-dBATCH", "-sDEVICE=jpeg", "-dEPSCrop", "-r150", 
+                   f"-sOutputFile={preview_path}", source_path]
+            subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if os.path.exists(preview_path):
+                # Baca balik ke RAM agar seragam
+                with open(preview_path, "rb") as f:
+                    ai_input_data = f.read()
+                try: os.remove(preview_path) # Langsung hapus temp file
+                except: pass
+                tech_specs["context_str"] = "This is a Vector Illustration."
+            else:
+                return {"status": "error", "file": filename, "msg": "Vector convert failed"}
 
-    return {
-        "status": "success", "file": filename, "new_name": final_name,
-        "file_type": ftype, 
-        "category": final_category, # <--- INI KUNCINYA
-        "temp_result_path": work_path, "temp_xmp_path": xmp_path,
-        "meta_title": title, "meta_desc": desc, "meta_kw": ", ".join(clean_kw),
-        "tokens_in": 0, "tokens_out": 0
-    }
+        if not ai_input_data:
+             return {"status": "error", "file": filename, "msg": "Failed to prepare image data"}
+
+        # --- 2. AI INFERENCE ---
+        final_prompt = full_prompt + f"\n[TECHNICAL DATA]: {tech_specs['context_str']} {', '.join(tech_specs['tags'])}"
+        
+        response = None
+        last_err = ""
+        
+        for attempt in range(max_retries + 1):
+            try:
+                if attempt > 0: time.sleep(2 * attempt)
+                # Kirim data (Bytes atau Path) ke engine
+                if provider == "Google Gemini (Native)":
+                    response = run_gemini_engine(model, api_key, ai_input_data, final_prompt)
+                else:
+                    response = run_openai_compatible_engine(model, api_key, base_url, ai_input_data, final_prompt)
+                if response: break
+            except Exception as e: last_err = str(e)
+        
+        if not response:
+            return {"status": "error", "file": filename, "msg": f"AI Fail: {last_err}"}
+
+        # --- 3. DATA PREPARATION (LOGIC BARU) ---
+        raw_kw = response.get("keywords", [])
+        if isinstance(raw_kw, str): raw_kw = raw_kw.split(',')
+        clean_kw = [k.strip().lower() for k in raw_kw if len(k) > 2][:49]
+        
+        title = response.get("title", "").strip()
+        clean_title = title.replace('"', '').replace("'", "")
+        category = response.get("category", "Uncategorized")
+        
+        # [FEATURE REQUEST: SUBJECT = TITLE + VISUAL DETAILS]
+        raw_ai_desc = response.get('description', '')
+        # Cek duplikasi agar tidak berulang
+        if clean_title.lower() in raw_ai_desc.lower()[:len(clean_title)+5]:
+            combined_desc = raw_ai_desc 
+        else:
+            combined_desc = f"{clean_title}. {raw_ai_desc}"
+            
+        # Potong Maksimal 190 Karakter (Agar muat di Windows Subject)
+        final_subject_desc = combined_desc[:190].strip()
+        
+        # Rapikan ending
+        if final_subject_desc.endswith(('.', ',')): 
+            final_subject_desc = final_subject_desc[:-1] + "."
+        elif not final_subject_desc.endswith('.'):
+            final_subject_desc += "."
+
+        # Keyword Formatting
+        flat_kw_windows = ";".join(clean_kw) # Pemisah ; untuk Windows
+        flat_kw_comma = ", ".join(clean_kw)  # Pemisah , untuk Agency
+        
+        # New Filename Logic
+        final_name = filename
+        if options.get("rename", True):
+            ext = os.path.splitext(filename)[1].lower()
+            safe_title = clean_filename(clean_title)[:50]
+            final_name = f"{safe_title}_{str(uuid.uuid4())[:4]}{ext}"
+
+        # --- METADATA MAPPING (LENGKAP) ---
+        tags_to_write = {
+            # 1. Standar Industri
+            "XMP:Title": clean_title,
+            "XMP:Description": final_subject_desc, 
+            "XMP:Subject": clean_kw,
+            "IPTC:Headline": clean_title,
+            "IPTC:Caption-Abstract": final_subject_desc,
+            "IPTC:Keywords": clean_kw,
+            
+            # 2. Standar Windows Explorer (Properties)
+            "EXIF:XPTitle": clean_title,         
+            "EXIF:XPKeywords": flat_kw_windows,  
+            "EXIF:XPSubject": final_subject_desc, # Muncul di Subject
+            "EXIF:XPComment": final_subject_desc,
+            
+            # 3. Extras
+            "EXIF:ImageDescription": final_subject_desc,
+            "XMP:Rating": 5
+        }
+
+        gc.collect()
+
+        return {
+            "status": "success", 
+            "file": filename,
+            "original_path": source_path, 
+            "new_name": final_name,
+            "file_type": ftype, 
+            "category": category,
+            "tags_data": tags_to_write, 
+            "meta_title": clean_title, 
+            "meta_desc": final_subject_desc, 
+            "meta_kw": flat_kw_comma,
+            "preview_bytes": None 
+        }
+
+    except Exception as e:
+        # Cleanup extra jika error
+        if 'preview_path' in locals() and os.path.exists(preview_path):
+            try: os.remove(preview_path)
+            except: pass
+        return {"status": "error", "file": filename, "msg": str(e)}

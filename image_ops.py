@@ -2,7 +2,9 @@ import cv2
 import numpy as np
 import os
 import subprocess
+import re
 from PIL import Image, ImageStat
+from xml.sax.saxutils import escape  # [PENTING] Untuk keamanan XML
 
 # --- 1. GPU AUTO-DETECT ---
 try:
@@ -44,6 +46,7 @@ def detect_blur(image_path, threshold=0.0):
     if threshold <= 0: return 0.0
     
     try:
+        # Gunakan cv2.imread tapi handle path non-ascii (opsional) jika perlu
         img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
         if img is None: return 0.0
 
@@ -74,12 +77,15 @@ def detect_blur(image_path, threshold=0.0):
             scores.append(calculate_fft_score(tile))
 
         scores.sort(reverse=True)
+        # Ambil rata-rata 2 tile ter-tajam (menghindari background blur dianggap blur total)
         top_scores = scores[:2]
         final_score = sum(top_scores) / len(top_scores)
         
         return final_score
 
-    except Exception as e: return 0.0
+    except Exception as e: 
+        print(f"Blur Check Error: {e}")
+        return 0.0
 
 # --- 3. BACKGROUND SORTING LOGIC ---
 
@@ -94,10 +100,10 @@ def analyze_background_type(image_path):
         s = 15 
 
         corners = [
-            img_np[0:s, 0:s],           
+            img_np[0:s, 0:s],            
             img_np[0:s, w-s:w],         
             img_np[h-s:h, 0:s],         
-            img_np[h-s:h, w-s:w],       
+            img_np[h-s:h, w-s:w],        
             img_np[0:s, int(w/2)-5:int(w/2)+5] 
         ]
         
@@ -126,21 +132,41 @@ def analyze_background_type(image_path):
 # --- 4. HELPERS ---
 
 def create_xmp_sidecar(path_without_ext, title, desc, keywords):
+    """
+    [SECURE VERSION] Membuat file XMP dengan XML Escaping.
+    Mencegah error jika text mengandung karakter '&', '<', '>'.
+    """
     try:
-        rdf_keywords = "\n".join([f"<rdf:li>{k}</rdf:li>" for k in keywords])
-        xmp = f"""<?xpacket begin='' id='W5M0MpCehiHzreSzNTczkc9d'?>
-<x:xmpmeta xmlns:x='adobe:ns:meta/'><rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'><rdf:Description rdf:about='' xmlns:dc='http://purl.org/dc/elements/1.1/'><dc:title><rdf:Alt><rdf:li xml:lang='x-default'>{title}</rdf:li></rdf:Alt></dc:title><dc:description><rdf:Alt><rdf:li xml:lang='x-default'>{desc}</rdf:li></rdf:Alt></dc:description><dc:subject><rdf:Bag>{rdf_keywords}</rdf:Bag></dc:subject></rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end='w'?>"""
-        with open(f"{path_without_ext}.xmp", "w", encoding="utf-8") as f: f.write(xmp)
-        return f"{path_without_ext}.xmp"
-    except: return None
+        # 1. Bersihkan input dari karakter ilegal XML
+        safe_title = escape(str(title)) if title else ""
+        safe_desc = escape(str(desc)) if desc else ""
+        
+        # 2. Loop keywords dan escape satu per satu
+        safe_keywords_list = []
+        if keywords:
+            for k in keywords:
+                safe_k = escape(str(k).strip())
+                if safe_k:
+                    safe_keywords_list.append(f"<rdf:li>{safe_k}</rdf:li>")
+        
+        rdf_keywords = "\n".join(safe_keywords_list)
 
-# [UPDATED] Fungsi ini sekarang me-resize gambar besar sebelum dikirim ke AI
+        # 3. Construct XML
+        xmp = f"""<?xpacket begin='' id='W5M0MpCehiHzreSzNTczkc9d'?>
+<x:xmpmeta xmlns:x='adobe:ns:meta/'><rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'><rdf:Description rdf:about='' xmlns:dc='http://purl.org/dc/elements/1.1/'><dc:title><rdf:Alt><rdf:li xml:lang='x-default'>{safe_title}</rdf:li></rdf:Alt></dc:title><dc:description><rdf:Alt><rdf:li xml:lang='x-default'>{safe_desc}</rdf:li></rdf:Alt></dc:description><dc:subject><rdf:Bag>{rdf_keywords}</rdf:Bag></dc:subject></rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end='w'?>"""
+        
+        output_path = f"{path_without_ext}.xmp"
+        with open(output_path, "w", encoding="utf-8") as f: 
+            f.write(xmp)
+            
+        return output_path
+    except Exception as e: 
+        print(f"XMP Creation Error: {e}")
+        return None
+
 def get_analysis_image_path(original_file_path):
     """
     Menyiapkan 'Mata' untuk AI.
-    - Video/Vector: Ambil frame/convert.
-    - Foto Besar (>1024px): Resize ke 1024px (Preview).
-    - Foto Kecil: Pakai asli.
     """
     try:
         ext = os.path.splitext(original_file_path)[1].lower()
@@ -154,7 +180,6 @@ def get_analysis_image_path(original_file_path):
             ret, frame = cap.read()
             cap.release()
             if ret:
-                # Resize frame video jika terlalu besar
                 h, w, _ = frame.shape
                 if w > 1024:
                     scale = 1024 / w
@@ -166,6 +191,7 @@ def get_analysis_image_path(original_file_path):
         # 2. Handle VECTOR (Convert ke JPG pakai Ghostscript)
         elif ext in ['.eps', '.ai']:
             args = ["gs", "-dNOPAUSE", "-dBATCH", "-sDEVICE=jpeg", "-dEPSCrop", "-r150", f"-sOutputFile={temp_img_path}", original_file_path]
+            # Tambahkan shell=True untuk Windows jika path bermasalah, tapi hati-hati security
             subprocess.run(args, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             if os.path.exists(temp_img_path): return temp_img_path
             return None
@@ -173,23 +199,20 @@ def get_analysis_image_path(original_file_path):
         # 3. Handle FOTO BIASA (Resize ke 1024px max)
         else:
             with Image.open(original_file_path) as img:
-                # Convert ke RGB (jika CMYK/RGBA) agar bisa di-save sebagai JPEG
                 if img.mode not in ('L', 'RGB'):
                     img = img.convert('RGB')
                 
-                # Cek ukuran, jika lebar/tinggi > 1024px, kecilkan!
                 w, h = img.size
                 if w > 1024 or h > 1024:
                     img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
                     img.save(temp_img_path, "JPEG", quality=80)
                     return temp_img_path
                 else:
-                    # Jika sudah kecil, tetap return path asli (biar gak menuhin storage)
                     return original_file_path
 
     except Exception as e:
-        print(f"[WARN] Gagal membuat preview: {e}")
-        return original_file_path # Fallback ke file asli jika gagal
+        # print(f"[WARN] Gagal membuat preview: {e}")
+        return original_file_path # Fallback
 
 # --- 5. MAIN CLASS ---
 
@@ -231,14 +254,19 @@ class StockPhotoOptimizer:
         if isinstance(ai_keywords, list): ai_tokens = [str(t).strip().lower() for t in ai_keywords]
         else: ai_tokens = [t.strip().lower() for t in (ai_keywords or "").split(",")]
         tech_tokens = [t.strip().lower() for t in technical_tags]
+        
         final = []
         seen = set()
+        
+        # Strategi Mixing: 5 AI Keyword teratas -> Tech Tags Penting -> Sisa AI -> Sisa Tech
         pool = ai_tokens[:5] + [t for t in tech_tokens if t in self.high_value_tech_tags] + ai_tokens[5:] + tech_tokens
+        
         for t in pool:
-            import re
+            # Hanya izinkan huruf, angka, spasi, dan dash
             c = re.sub(r"[^a-z0-9\s-]", "", t).strip()
-            if len(c)>2 and c not in seen and c not in self.universal_blacklist:
-                final.append(c); seen.add(c)
+            if len(c) > 2 and c not in seen and c not in self.universal_blacklist:
+                final.append(c)
+                seen.add(c)
         return final[:49]
 
 # --- 6. HYBRID SIMILARITY CHECKER (Structure + Color) ---
@@ -248,25 +276,30 @@ def compute_dhash(image_path, hash_size=16):
     [UPGRADED] Mengembalikan Dictionary berisi Struktur dan Data Warna.
     """
     try:
-        # 1. Load Image
         img = cv2.imread(image_path)
         if img is None: return None
         
-        # 2. Structure Hash (dHash Grayscale 16-bit)
+        # Structure Hash (dHash Grayscale 16-bit)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         resized_gray = cv2.resize(gray, (hash_size + 1, hash_size), interpolation=cv2.INTER_AREA)
         diff = resized_gray[:, 1:] > resized_gray[:, :-1]
-        structure_hash = sum([2 ** i for (i, v) in enumerate(diff.flatten()) if v])
         
-        # 3. Color Signature (9x9 Low Res Grid - Flattened)
+        # Konversi array boolean ke integer
+        # Flatten dan hitung decimal value
+        structure_hash = 0
+        for i, v in enumerate(diff.flatten()):
+            if v: structure_hash += (2 ** i)
+        
+        # Color Signature (9x9 Low Res Grid - Flattened)
         resized_color = cv2.resize(img, (9, 9), interpolation=cv2.INTER_AREA)
-        color_sig = resized_color.flatten() # Array panjang (R, G, B, R, G, B...)
+        color_sig = resized_color.flatten().astype(np.float32) # Pastikan float untuk perhitungan distance
         
         return {
             "structure": structure_hash,
             "color": color_sig
         }
-    except:
+    except Exception as e:
+        # print(f"Hash Error: {e}")
         return None
 
 def calculate_similarity_percentage(hash1, hash2, hash_size=16):
@@ -278,7 +311,11 @@ def calculate_similarity_percentage(hash1, hash2, hash_size=16):
     
     # 1. Cek Struktur (dHash)
     s1, s2 = hash1["structure"], hash2["structure"]
+    
+    # XOR operation untuk mencari perbedaan bit
+    # Pastikan tipe data int (Python handle large int automatically)
     hamming_dist = bin(int(s1) ^ int(s2)).count('1')
+    
     total_bits = hash_size * hash_size
     struct_sim = (total_bits - hamming_dist) / total_bits * 100
     
@@ -288,12 +325,17 @@ def calculate_similarity_percentage(hash1, hash2, hash_size=16):
         
     # 2. Cek Warna (Hanya jika struktur mirip)
     c1, c2 = hash1["color"], hash2["color"]
+    
+    # Manhattan Distance (Mean Absolute Difference)
     dist = np.mean(np.abs(c1 - c2))
     
     # Konversi Distance ke Similarity %
-    color_sim = max(0, 100 - (dist * 1.5))
+    # Threshold empiris: distance 0 = 100%, distance > 60 = 0%
+    color_sim = max(0.0, 100.0 - (dist * 1.5))
     
     # 3. Final Verdict (Hybrid Logic)
+    # Kita ambil nilai MINIMUM karena untuk disebut duplikat,
+    # KEDUANYA (Struktur & Warna) harus mirip.
     final_sim = min(struct_sim, color_sim)
     
     return final_sim

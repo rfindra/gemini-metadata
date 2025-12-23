@@ -1,4 +1,5 @@
 import os
+import sys
 from dotenv import load_dotenv
 
 # Load Environment Variables
@@ -16,6 +17,21 @@ if not os.path.exists(BASE_WORK_DIR):
 DEFAULT_INTERNAL_OUTPUT = os.path.join(os.getcwd(), "output")
 DB_FILE = "gemini_history.db"
 
+# [BARU] CENTRALIZED TOOL PATH (Refactor Poin 2)
+# Deteksi path ExifTool sekali saja di sini agar modular dan rapi.
+# Module lain tinggal import EXIFTOOL_PATH dari sini.
+if os.name == 'nt':
+    # Windows: Prioritaskan folder 'tools' lokal agar portable
+    EXIFTOOL_PATH = os.path.join(os.getcwd(), "tools", "exiftool.exe")
+else:
+    # Linux/Mac: Asumsi terinstall di global PATH (install via apt/brew)
+    EXIFTOOL_PATH = "exiftool"
+
+# Validasi khusus Windows (Linux biasanya handle via 'which' di runtime)
+if os.name == 'nt' and not os.path.exists(EXIFTOOL_PATH):
+    print(f"⚠️ Warning: ExifTool binary not found at {EXIFTOOL_PATH}. Metadata writing might fail.")
+    EXIFTOOL_PATH = None 
+
 # Pricing Configuration (Estimasi per 1M token)
 MODEL_PRICES = {
     "default": {"in": 0.10, "out": 0.40},
@@ -31,30 +47,30 @@ MODEL_PRICES = {
 PROMPT_PRESETS = {
     "Commercial (Standard) - BEST SELLER": {
         "title": "Stock Title: 5-15 words. Literal and precise.",
-        "desc": "Analysis: Quality Score 1-10 & IP Safety Check (Logos/Trademarks).",
+        "desc": "Visual Details: Lighting, Pose, Context, Vibe.",
         "full_instruction": """
-        Role: Expert Stock Photographer & Intellectual Property Lawyer.
-        Task: Analyze the image for premium commercial stock agencies (Adobe Stock/Shutterstock).
+        Role: Expert Stock Photographer & Metadata Specialist.
+        Task: Analyze the image for Adobe Stock/Shutterstock.
         
         Requirements:
-        1. SAFETY CHECK: Scan for visible trademarks, brand logos, copyrighted art, or recognizable private property.
-           - If found, list them in 'safety_check'.
-           - If none, write 'CLEAN'.
-        2. QUALITY SCORE: Rate the commercial appeal (1-10) based on composition, lighting, and marketability.
-        3. METADATA: Provide a literal Title (max 15 words) and 40-50 Keywords sorted by relevance.
+        1. SAFETY CHECK: Scan for trademarks/logos/faces. List found items or 'CLEAN'.
+        2. QUALITY SCORE: Rate 1-10 (Commercial Appeal).
+        3. METADATA GENERATION:
+           - Title: Literal summary (Who, What, Where). Max 15 words.
+           - Description: Do NOT repeat the title. Focus strictly on VISUAL DETAILS: Lighting (soft/harsh/natural), Angle (eye-level/aerial), Focus (sharp/bokeh), and Subject Action/Pose.
+           - Keywords: 40-50 tags. Start with visible objects, then concepts.
         
         Output MUST be in valid JSON format:
         {
           "title": "...",
           "description": "...",
-          "keywords": ["keyword1", "keyword2"],
+          "keywords": ["tag1", "tag2"],
           "category": "...",
           "safety_check": "...",
           "quality_score": 0.0
         }
         """
-    },
-    "Microstock Specialist (Shutterstock/Adobe)": {
+    },    "Microstock Specialist (Shutterstock/Adobe)": {
         "title": "Stock Title: 5-10 words describing Who, What, Where.",
         "desc": "Focus: Commercial demand and high-relevance keywords."
     },
@@ -79,16 +95,16 @@ PROVIDERS = {
         "env_var": "GOOGLE_API_KEY", 
         "models": {
             # Model High Quota (14.400 RPD) - Gunakan untuk Batch besar
-            "Gemma 3 - 27B IT": "gemma-3-27b-it", # Perbaikan: Tambah -it
-            "Gemma 3 - 12B IT": "gemma-3-12b-it", # Perbaikan: Tambah -it
+            "Gemma 3 - 27B IT": "gemma-3-27b-it", 
+            "Gemma 3 - 12B IT": "gemma-3-12b-it", 
             
             # Model Vision Terbaru (Kualitas Metadata Terbaik)
             "Gemini 2.0 Flash": "gemini-2.0-flash", 
             "Gemini 2.5 Flash": "gemini-2.5-flash",
             
             # Model Experimental (Sangat Cerdas tapi kuota sedikit)
-            "Gemini 3 Flash Preview": "gemini-3-flash-preview", # Perbaikan: Tambah -preview
-            "Gemini 3 Pro Preview": "gemini-3-pro-preview",     # Perbaikan: Tambah -preview
+            "Gemini 3 Flash Preview": "gemini-3-flash-preview", 
+            "Gemini 3 Pro Preview": "gemini-3-pro-preview",     
             
             # Kuda Beban Stabil (Paling direkomendasikan untuk stock photo)
             "Gemini 1.5 Flash (Legacy)": "gemini-1.5-flash"

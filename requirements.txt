@@ -8,5 +8,5 @@ opencv-python-headless
 pandas
 openpyxl
 python-dotenv
-cupy-cuda12x
 streamlit-option-menu
+typing_extensions

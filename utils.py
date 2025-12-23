@@ -1,27 +1,45 @@
-# utils.py
 import re
 import json
 import subprocess
+import os # Tambahkan os
 from config import MODEL_PRICES
 
 def clean_filename(title):
+    # Hapus karakter aneh file system
     clean = re.sub(r'[\\/*?:"<>|]', "", title)
-    clean = clean.replace(" ", "-").strip().lower()
-    return clean[:50]
+    # Ganti spasi dengan underscore atau dash agar lebih aman di URL/Web
+    clean = clean.replace(" ", "_").strip().lower()
+    # Batasi panjang agar tidak error di Windows (Max path limit)
+    return clean[:100]
 
 def extract_json(text):
-    cleaned = re.sub(r"^```json|```$", "", text.strip(), flags=re.MULTILINE)
-    try: return json.loads(cleaned)
+    """
+    Pembersih JSON yang lebih agresif untuk menangani output AI yang 'kotor'.
+    """
+    text = text.strip()
+    
+    # 1. Coba parsing langsung (Best Case)
+    try: return json.loads(text)
+    except: pass
+
+    # 2. Hapus Markdown Code Blocks (```json ... ```)
+    pattern = r"```(?:json)?\s*(\{.*?\})\s*```"
+    match = re.search(pattern, text, re.DOTALL)
+    if match:
+        try: return json.loads(match.group(1))
+        except: pass
+
+    # 3. Cari kurung kurawal terluar secara manual (Fallback terakhir)
+    try:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1:
+            json_str = text[start : end + 1]
+            return json.loads(json_str)
     except:
-        start = cleaned.find("{")
-        if start != -1:
-            depth = 0
-            for i, c in enumerate(cleaned[start:], start=start):
-                if c == "{": depth += 1
-                elif c == "}": depth -= 1
-                if depth == 0:
-                    try: return json.loads(cleaned[start:i+1])
-                    except: continue
+        pass
+        
+    # 4. Jika gagal total, return dict kosong agar aplikasi tidak crash
     return {}
 
 def calculate_cost(model_name, tokens_in, tokens_out):
@@ -34,6 +52,7 @@ def calculate_cost(model_name, tokens_in, tokens_out):
     return cost
 
 def select_folder_from_wsl(dialog_title="Pilih Folder"):
+    # (Kode tetap sama seperti sebelumnya)
     try:
         ps_script = f"""
         Add-Type -AssemblyName System.Windows.Forms
@@ -56,6 +75,7 @@ def select_folder_from_wsl(dialog_title="Pilih Folder"):
         return None
 
 def construct_prompt_template(title_rule, desc_rule):
+    # (Kode tetap sama)
     return f"""
     Analyze for Commercial Stock (Photo/Video/Vector). Return strictly JSON.
     SYSTEM CONTEXT (Visual Facts): {{context_injection}}
