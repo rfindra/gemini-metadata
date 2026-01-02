@@ -1,111 +1,132 @@
-# ✨ Gemini-Metadata: AI-Powered Stock Media Automator
+# ✨ Gemini-Metadata: AI-Powered Stock Media Automator (V4)
 
-**Gemini-Metadata** adalah asisten otomasi cerdas yang dirancang khusus untuk kontributor *stock media* (Photo, Video, & Vector). Alat ini menggabungkan kekuatan **Vision AI** terkini dengan teknik pemrosesan citra tingkat tinggi untuk menghasilkan metadata yang akurat, relevan, dan siap jual secara otomatis.
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![Streamlit](https://img.shields.io/badge/Frontend-Streamlit-red) ![CUDA](https://img.shields.io/badge/GPU-NVIDIA%20CUDA%2013.x-green) ![License](https://img.shields.io/badge/License-MIT-purple)
 
----
-
-## 🚀 Fitur Utama
-
-* **Multimodal AI Analysis**: Integrasi dengan Google Gemini (3 Flash, 2.5 Flash, 1.5 Pro) untuk analisis konten visual secara mendalam.
-* **Smart Duplication Filter**: Menggunakan algoritma **dHash (Difference Hashing)** + **Color Signature** untuk mendeteksi foto *burst*, mencegah pemborosan kuota API.
-* **GPU Accelerated Processing**: Deteksi ketajaman (*blur detection*) berbasis **FFT (Fast Fourier Transform)** yang diakselerasi oleh **NVIDIA GPU (via CuPy)**.
-* **Universal Metadata Writing**: Penulisan otomatis Title, Description, dan Keywords ke dalam tag **EXIF, IPTC, dan XMP** menggunakan ExifTool.
-* **WSL-Windows Bridge**: Solusi unik menggunakan *PowerShell bridge* agar pengguna Linux (WSL) tetap bisa menggunakan *Folder Picker* asli Windows.
-* **Agency Ready Reports**: Ekspor otomatis ke format CSV yang kompatibel dengan **Adobe Stock, Shutterstock, dan Getty Images**.
+**Gemini-Metadata** adalah asisten otomasi cerdas untuk kontributor *stock media* (Photo, Video, & Vector). Versi terbaru ini menghadirkan antarmuka **Modern & Clean**, arsitektur kode modular, serta dukungan penuh untuk **Rate Limiting** dan **GPU Acceleration** (CUDA 13.x) demi performa maksimal tanpa error API.
 
 ---
 
-## 🛠️ Arsitektur Teknologi
+## 🚀 Fitur Baru & Utama
 
-* **Frontend**: Streamlit (Web-based Dashboard)
-* **Intelligence**: Google Gemini API, OpenAI SDK
-* **Database**: SQLite (History & Prompt Logs)
-* **Image Core**: OpenCV, Pillow, CuPy (GPU Acceleration)
-* **Metadata Core**: PyExifTool (ExifTool Wrapper)
+### 🎨 Modern UI & Experience
+* **Clean Dashboard**: Desain antarmuka baru menggunakan font *Inter*, layout *card* minimalis, dan *spacing* yang lega.
+* **Smart Gallery**: Galeri interaktif dengan fitur pencarian, paginasi, dan tombol *Quick Edit* (Popover) yang rapi.
+* **Hardware Status Badge**: Indikator *real-time* di sidebar untuk memantau status akselerasi (NVIDIA GPU / Intel / Apple Silicon / CPU Mode).
+
+### ⚡ Performa & Logika
+* **Smart Rate Limiter**: Kontrol penuh atas *Threads* dan *Delay* (detik) untuk mematuhi batas kuota API (misal: 30 RPM pada model Gemma-3), mencegah error `429 Too Many Requests`.
+* **Batch Processing Core**: Fokus pada pemrosesan massal yang stabil dengan *limit slider* otomatis (Maksimal = Total File).
+* **GPU Accelerated**: Deteksi *blur* super cepat menggunakan **CuPy** (mendukung driver NVIDIA terbaru CUDA 13.x).
+* **Clean Logs**: Terminal bebas dari *spam* warning gRPC/Fork berkat optimasi *environment variables*.
+
+### 🧠 Kemampuan Inti
+* **Multimodal AI Analysis**: Integrasi Google Gemini (2.0 Flash, 1.5 Pro) untuk analisis visual mendalam.
+* **Duplicate Filter**: Algoritma *dHash* untuk membuang foto duplikat/burst sebelum diproses (hemat biaya API).
+* **Universal Metadata**: Menulis metadata (Title, Desc, Keywords) langsung ke file (EXIF/IPTC/XMP) via ExifTool.
+* **Agency Reports**: Ekspor CSV otomatis untuk Adobe Stock, Shutterstock, dan Getty Images.
 
 ---
 
-## 📥 Panduan Instalasi Sistem (Step-by-Step)
+## 🛠️ Arsitektur Teknologi (Refactored)
 
-Ikuti langkah-langkah di bawah ini untuk menyiapkan lingkungan **Ubuntu 24.04.3 LTS** di dalam Windows menggunakan **WSL2**.
+Kode kini terorganisir secara modular untuk kemudahan pemeliharaan:
 
-### 1. Instalasi WSL (Windows Subsystem for Linux)
-Buka **PowerShell** (Run as Administrator), lalu jalankan perintah:
-```powershell
-wsl --install
-Catatan: Jika sudah terinstall, pastikan versinya terbaru dengan perintah wsl --update.
+* **`app.py`**: Router utama dan konfigurasi CSS/Global State.
+* **`views.py`**: Menangani seluruh tampilan antarmuka (UI), Sidebar, Galeri, dan Widget.
+* **`app_helpers.py`**: Logika *backend* jembatan antara UI dan pemrosesan data.
+* **`processor.py`**: Otak pemrosesan gambar dan komunikasi ke AI Engine.
+* **`image_ops.py`**: Operasi citra tingkat rendah (Hashing, Blur Detection via GPU).
+* **`database.py`**: Manajemen SQLite untuk riwayat dan log.
 
-2. Instalasi Ubuntu 24.04.3 LTS
-Gunakan distro Ubuntu Noble terbaru untuk stabilitas maksimal:
+---
 
-PowerShell
+## 📥 Panduan Instalasi (Ubuntu 24.04 / WSL2)
 
-wsl --install -d Ubuntu-24.04
-Setelah selesai, jendela terminal akan terbuka. Masukkan Username dan Password baru Anda.
+### 1. Prasyarat Sistem
+* **Windows 10/11** dengan driver NVIDIA terbaru (mendukung CUDA 13.x).
+* **WSL2** terinstall.
 
-3. Pembaruan Sistem (Update & Upgrade)
-Di dalam terminal Ubuntu, jalankan perintah berikut untuk memastikan semua library sistem terbaru:
+### 2. Setup Lingkungan (Terminal Ubuntu)
 
-Bash
+Jalankan perintah berikut satu per satu:
 
+```bash
+# 1. Update sistem
 sudo apt update && sudo apt upgrade -y
-4. Dukungan GPU NVIDIA (CUDA)
-Aplikasi ini mendukung akselerasi GPU untuk pemrosesan gambar.
 
-Langkah: Cukup install driver NVIDIA terbaru (Game Ready atau Studio Driver) di Windows Anda.
-
-Verifikasi: Di terminal Ubuntu, ketik nvidia-smi. Jika muncul tabel informasi GPU, maka dukungan GPU sudah aktif.
-
-⚙️ Setup & Instalasi Proyek
-1. Clone Repositori
-Bash
-
+# 2. Clone Repositori
 git clone [https://github.com/USERNAME/gemini-metadata.git](https://github.com/USERNAME/gemini-metadata.git)
 cd gemini-metadata
-2. Jalankan Auto-Installer
-Gunakan script setup.sh yang sudah disediakan untuk menginstall semua dependensi (Python, Venv, ExifTool, FFmpeg, dll) secara otomatis:
 
-Bash
-
+# 3. Jalankan Auto-Installer (V4)
+# Script ini akan menginstall Python, Venv, ExifTool, dan Library CUDA secara otomatis.
 chmod +x setup.sh
 ./setup.sh
 3. Konfigurasi API Key
-Buat file .env di folder utama proyek:
+Buat file .env dan masukkan API Key Google Gemini Anda:
 
 Bash
 
 nano .env
-Masukkan API Key Anda di dalamnya:
+Isi dengan:
 
-Plaintext
+Ini, TOML
 
-GOOGLE_API_KEY=AIzaSy... (masukkan key Anda di sini)
-Tekan Ctrl+O, Enter, lalu Ctrl+X untuk menyimpan.
+GOOGLE_API_KEY=AIzaSy... (Paste API Key Anda di sini)
+Simpan dengan Ctrl+O -> Enter -> Ctrl+X.
 
 🖥️ Cara Penggunaan
-Jalankan Aplikasi:
+1. Menjalankan Aplikasi
+Gunakan shortcut yang telah dibuat oleh installer:
 
 Bash
 
 ./run.sh
-Buka Browser: Akses alamat http://localhost:8501.
+Buka browser di: http://localhost:8501
 
-Pilih Folder: Gunakan tombol Browse untuk memilih folder foto di Windows Anda.
+2. Memproses File (Metadata Auto)
+Buka menu Metadata Auto di sidebar.
 
-Scan Duplikasi: Klik Scan for Duplicates untuk membersihkan file yang serupa (hemat kuota).
+Pilih Folder: Gunakan tombol "Browse" (akan membuka dialog Windows asli).
 
-Start Processing: Tekan tombol proses dan AI akan mulai mengisi metadata ke file Anda.
+Atur Konfigurasi Batch (Sidebar):
 
-📂 Struktur Proyek
-app.py: Antarmuka utama Streamlit.
+Threads: Set ke 1 jika menggunakan model gratisan (untuk menghindari limit).
 
-processor.py: Logika utama alur pemrosesan file.
+Delay: Set ke 2.5 detik agar aman (di bawah 30 RPM).
 
-image_ops.py: Algoritma hashing, deteksi blur, dan optimasi GPU.
+Scan Duplicates (Opsional): Hapus file kembar sebelum diproses.
 
-ai_engine.py: Driver komunikasi API AI.
+Start Processing: Klik tombol roket untuk memulai.
 
-database.py: Manajemen riwayat proses (SQLite).
+3. Review & Edit (Smart Gallery)
+Buka menu Gallery.
 
-utils.py: Helper functions & WSL Windows Bridge.
----
+Gunakan Search Bar untuk mencari file tertentu.
+
+Klik tombol Edit (✏️) pada kartu gambar untuk merevisi metadata menggunakan AI (misal: "Ubah ke Bahasa Indonesia").
+
+Gunakan Bulk Actions untuk mengedit banyak file sekaligus.
+
+📂 Struktur Folder Proyek
+Plaintext
+
+gemini-metadata/
+├── app.py              # Main Entry Point & Router
+├── views.py            # UI Components (Sidebar, Pages, Cards)
+├── app_helpers.py      # Backend Logic & Helper Functions
+├── processor.py        # Core Image Processing Pipeline
+├── image_ops.py        # GPU Acceleration & Image Algo
+├── database.py         # SQLite Handler
+├── ai_engine.py        # LLM Interface
+├── config.py           # Constants & Settings
+├── utils.py            # Utility Tools
+├── setup.sh            # Auto Installer Script
+├── run.sh              # App Launcher
+└── requirements.txt    # Python Dependencies
+⚠️ Catatan Penting
+GPU Mode: Jika Anda melihat [INFO] NVIDIA GPU Detected, berarti akselerasi aktif. Jika [WARN], pastikan driver NVIDIA di Windows sudah terupdate.
+
+API Quota: Pantau penggunaan API Anda di Google AI Studio. Gunakan fitur Delay di aplikasi untuk menghindari temporary ban.
+
+Developed with ❤️ for Stock Contributors.

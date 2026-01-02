@@ -6,6 +6,8 @@ import shutil
 import datetime
 import exiftool
 import math
+import platform
+import subprocess
 from dotenv import load_dotenv
 
 # Import Config & Modules
@@ -19,6 +21,54 @@ from database import update_history_entry
 load_dotenv(override=True)
 
 SETTINGS_FILE = "user_settings.json"
+
+# --- HARDWARE DETECTION (NEW) ---
+@st.cache_resource
+def get_hardware_status():
+    """Mendeteksi Hardware Akselerasi (NVIDIA/AMD/Intel/Apple Silicon)."""
+    system = platform.system()
+    
+    # 1. Cek Apple Silicon (Mac)
+    if system == "Darwin":
+        machine = platform.machine()
+        if "arm" in machine.lower():
+            return "🍏 Apple Silicon (M1/M2/M3)", "success"
+        return "💻 Intel Mac (CPU)", "warning"
+
+    # 2. Cek NVIDIA (Windows/WSL/Linux)
+    # Cara paling akurat untuk cek CUDA support
+    try:
+        subprocess.check_output("nvidia-smi", shell=True, stderr=subprocess.DEVNULL)
+        return "🟢 NVIDIA GPU Detected", "success"
+    except:
+        pass
+
+    # 3. Cek General GPU (Intel/AMD) via lspci (Linux/WSL)
+    if system == "Linux":
+        try:
+            # Cek device display/vga/3d
+            pci_out = subprocess.check_output("lspci | grep -i 'vga\\|3d\\|display'", shell=True, stderr=subprocess.DEVNULL).decode().lower()
+            
+            if "intel" in pci_out:
+                return "🔵 Intel IGP/Arc Detected", "info"
+            elif "amd" in pci_out or "ati" in pci_out:
+                return "🔴 AMD Radeon GPU Detected", "info"
+            elif "microsoft" in pci_out:
+                # WSL2 seringkali terbaca sebagai Microsoft Basic Render Driver jika tidak ada passthrough
+                return "⚠️ WSL Virtual Device (CPU)", "warning"
+        except:
+            pass
+
+    # 4. Fallback Windows (wmic) jika bukan WSL
+    if system == "Windows":
+        try:
+            wmic_out = subprocess.check_output("wmic path win32_VideoController get name", shell=True).decode().lower()
+            if "intel" in wmic_out: return "🔵 Intel Graphics", "info"
+            if "amd" in wmic_out or "radeon" in wmic_out: return "🔴 AMD Radeon", "info"
+        except:
+            pass
+
+    return "⚠️ CPU Mode (No Dedicated GPU)", "warning"
 
 # --- STATE MANAGEMENT ---
 def init_session_state():
@@ -55,10 +105,12 @@ def init_session_state():
 
     # Load Global API Key from Env if available
     default_provider = "Google Gemini (Native)"
-    env_var = PROVIDERS[default_provider]["env_var"]
-    env_key = os.getenv(env_var)
-    if env_key and not st.session_state['active_global_api_key']:
-        st.session_state['active_global_api_key'] = env_key
+    try:
+        env_var = PROVIDERS[default_provider]["env_var"]
+        env_key = os.getenv(env_var)
+        if env_key and not st.session_state['active_global_api_key']:
+            st.session_state['active_global_api_key'] = env_key
+    except: pass
 
 # --- SETTINGS HANDLERS ---
 def load_settings():

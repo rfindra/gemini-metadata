@@ -10,3 +10,5 @@ openpyxl
 python-dotenv
 streamlit-option-menu
 typing_extensions
+# Akselerasi GPU NVIDIA (CUDA 13.x)
+cupy-cuda13x

@@ -6,8 +6,8 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 echo -e "${BLUE}==========================================${NC}"
-echo -e "${GREEN}    GEMINI METADATA - AUTO INSTALLER V3   ${NC}"
-echo -e "${GREEN}    (Fix for Ubuntu 24.04 Noble)          ${NC}"
+echo -e "${GREEN}    GEMINI METADATA - AUTO INSTALLER V4   ${NC}"
+echo -e "${GREEN}    (CUDA 13.x Edition)                   ${NC}"
 echo -e "${BLUE}==========================================${NC}"
 
 # 1. Update & Install System Dependencies
@@ -43,12 +43,19 @@ else
     exit 1
 fi
 
-# 4. Membuat file Shortcut 'run.sh' (Headless & Background Ready)
+# 4. Membuat file Shortcut 'run.sh' (Updated with Clean Logs Env)
 echo -e "${BLUE}[4/5] Membuat shortcut eksekusi internal Linux...${NC}"
 cat <<EOF > run.sh
 #!/bin/bash
 source $(pwd)/venv/bin/activate
+
+# Suppress Python Warnings
 export PYTHONWARNINGS="ignore"
+
+# Suppress gRPC Fork/Noise Logs (Fix Terminal Spam)
+export GRPC_ENABLE_FORK_SUPPORT=0
+export GRPC_VERBOSITY=ERROR
+
 cd $(pwd)
 # Headless true agar tidak error saat dijalankan via VBScript/Startup
 streamlit run app.py --server.headless true
@@ -58,26 +65,19 @@ chmod +x run.sh
 # 5. Membuat Shortcut Startup Windows (Silent Mode)
 echo -e "${BLUE}[5/5] Mengintegrasikan ke Startup Windows...${NC}"
 
-# 1. Perbaikan: Hapus backslash (\) sebelum $(...) dan di dalam awk
-# Gunakan -oP atau logika awk standar agar lebih aman menangkap nama distro
+# Deteksi Distro WSL saat ini
 CURRENT_DISTRO=$(wsl.exe -l -v | grep -E '\*' | awk '{print $2}' | tr -d '\r')
-
-# Fallback jika deteksi gagal
 if [ -z "$CURRENT_DISTRO" ]; then CURRENT_DISTRO="Ubuntu-24.04"; fi
 
-# 2. Perbaikan: Hapus backslash pada command substitution user Windows
+# Deteksi User Windows
 WIN_USER=$(cmd.exe /c "echo %USERNAME%" 2>/dev/null | tr -d '\r')
 STARTUP_PATH="/mnt/c/Users/$WIN_USER/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup"
 
 if [ -d "$STARTUP_PATH" ]; then
-    # Hapus backslash pada variabel path
     VBS_FILE="$STARTUP_PATH/StartGeminiMetadata.vbs"
-    
-    # Simpan path saat ini untuk hardcode ke dalam VBS
     CURRENT_DIR=$(pwd)
 
-    # 3. Perbaikan: Hapus backslash pada variabel di dalam EOF
-    # Kita ingin VBS diisi dengan NILAI variabel (misal: "Ubuntu"), bukan teks "$CURRENT_DISTRO"
+    # Generate VBScript
     cat <<EOF > "$VBS_FILE"
 Set WinScriptHost = CreateObject("WScript.Shell")
 ' Parameter 0 menjalankan script tanpa memunculkan jendela hitam CMD
@@ -88,11 +88,6 @@ EOF
 else
     echo -e "\033[0;33m[WARN] Folder Startup Windows tidak ditemukan.\033[0m"
 fi
-
-# Warna untuk output (pastikan variabel warna sudah didefinisikan sebelumnya atau gunakan raw code)
-GREEN='\033[0;32m'
-BLUE='\033[0;34m'
-NC='\033[0m'
 
 echo -e "${GREEN}==========================================${NC}"
 echo -e "${GREEN}✅ SETUP SELESAI! GEMINI METADATA SIAP.   ${NC}"
