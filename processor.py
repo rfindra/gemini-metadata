@@ -1,4 +1,4 @@
-# processor.py
+# processor.py (Final Optimized: Unique Batch Logic)
 import os
 import time
 import shutil
@@ -32,7 +32,6 @@ def determine_file_type(filename):
     return "Other"
 
 # --- MAIN PROCESSOR (Metadata Generator Only) ---
-# [UPDATE] Menambahkan parameter 'user_correction'
 def process_single_file(filename, provider, model, api_key, base_url, max_retries, options, full_prompt, source_dir, custom_temp_dir=None, blur_threshold=10.0, user_correction=None):
     thread_id = str(uuid.uuid4())[:8]
     source_path = os.path.join(source_dir, filename)
@@ -112,7 +111,7 @@ def process_single_file(filename, provider, model, api_key, base_url, max_retrie
         # [ALUR VECTOR]
         elif ftype == "Vector":
             import subprocess
-            # WSL menggunakan 'gs' standard Linux
+            # WSL: Gunakan 'gs' (Linux)
             args = ["gs", "-dNOPAUSE", "-dBATCH", "-sDEVICE=jpeg", "-dEPSCrop", "-r150", 
                    f"-sOutputFile={preview_path}", source_path]
             subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -128,21 +127,27 @@ def process_single_file(filename, provider, model, api_key, base_url, max_retrie
         if not ai_input_data:
              return {"status": "error", "file": filename, "msg": "Failed to prepare image data"}
 
-        # --- 2. AI INFERENCE (Dengan User Correction Support) ---
+        # --- 2. AI INFERENCE (FIXED LOGIC FOR UNIQUE BATCH) ---
         
         tech_data_str = f"[TECHNICAL DATA]: {tech_specs['context_str']} {', '.join(tech_specs['tags'])}"
 
-        # Logic Injection Prompt
+        # Jika ada koreksi user, kita minta AI menggabungkan (MERGE), bukan menimpa total (OVERWRITE)
         if user_correction:
             final_prompt = f"""
             {full_prompt}
             
-            [🚨 CRITICAL USER OVERRIDE]: 
-            The user has provided specific instructions for this image. You MUST prioritize this over your visual analysis.
-            USER INSTRUCTION: "{user_correction}"
+            [⚠️ INSTRUCTION FROM USER]:
+            "{user_correction}"
             
-            Refine the Title, Description, and Keywords to strictly align with the user's instruction above.
+            [TASK - IMPORTANT]:
+            1. ANALYZE the specific visual details of THIS image (Visual Context).
+            2. INCORPORATE the user's instruction above into the Title, Description, and Keywords.
+            3. MAINTAIN UNIQUENESS: 
+               - Do NOT simply copy-paste the user's instruction as the Title.
+               - Contextualize the user's instruction with the actual image content.
+               - Example: If user says "Sunset" and image has a cat, Title should be "Cat Silhouette at Sunset", NOT just "Sunset".
             
+            Output strictly JSON based on the combined context.
             {tech_data_str}
             """
         else:
@@ -193,7 +198,7 @@ def process_single_file(filename, provider, model, api_key, base_url, max_retrie
         if options.get("rename", True):
             ext = os.path.splitext(filename)[1].lower()
             safe_title = clean_filename(clean_title)[:50]
-            # UUID tetap dipakai untuk keunikan
+            # UUID tetap dipakai untuk memastikan nama file unik secara fisik
             final_name = f"{safe_title}_{str(uuid.uuid4())[:4]}{ext}"
 
         # --- METADATA MAPPING ---
