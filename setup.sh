@@ -58,28 +58,43 @@ chmod +x run.sh
 # 5. Membuat Shortcut Startup Windows (Silent Mode)
 echo -e "${BLUE}[5/5] Mengintegrasikan ke Startup Windows...${NC}"
 
-# Deteksi Nama Distro secara dinamis
-CURRENT_DISTRO=\$(wsl.exe -l -v | grep -E '\*' | awk '{print \$2}' | tr -d '\r')
-if [ -z "\$CURRENT_DISTRO" ]; then CURRENT_DISTRO="Ubuntu-24.04"; fi
+# 1. Perbaikan: Hapus backslash (\) sebelum $(...) dan di dalam awk
+# Gunakan -oP atau logika awk standar agar lebih aman menangkap nama distro
+CURRENT_DISTRO=$(wsl.exe -l -v | grep -E '\*' | awk '{print $2}' | tr -d '\r')
 
-WIN_USER=\$(cmd.exe /c "echo %USERNAME%" 2>/dev/null | tr -d '\r')
-STARTUP_PATH="/mnt/c/Users/\$WIN_USER/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup"
+# Fallback jika deteksi gagal
+if [ -z "$CURRENT_DISTRO" ]; then CURRENT_DISTRO="Ubuntu-24.04"; fi
 
-if [ -d "\$STARTUP_PATH" ]; then
-    VBS_FILE="\$STARTUP_PATH/StartGeminiMetadata.vbs"
-    cat <<EOF > "\$VBS_FILE"
+# 2. Perbaikan: Hapus backslash pada command substitution user Windows
+WIN_USER=$(cmd.exe /c "echo %USERNAME%" 2>/dev/null | tr -d '\r')
+STARTUP_PATH="/mnt/c/Users/$WIN_USER/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup"
+
+if [ -d "$STARTUP_PATH" ]; then
+    # Hapus backslash pada variabel path
+    VBS_FILE="$STARTUP_PATH/StartGeminiMetadata.vbs"
+    
+    # Simpan path saat ini untuk hardcode ke dalam VBS
+    CURRENT_DIR=$(pwd)
+
+    # 3. Perbaikan: Hapus backslash pada variabel di dalam EOF
+    # Kita ingin VBS diisi dengan NILAI variabel (misal: "Ubuntu"), bukan teks "$CURRENT_DISTRO"
+    cat <<EOF > "$VBS_FILE"
 Set WinScriptHost = CreateObject("WScript.Shell")
 ' Parameter 0 menjalankan script tanpa memunculkan jendela hitam CMD
-WinScriptHost.Run "wsl.exe -d \$CURRENT_DISTRO -u \$USER -- bash -c ""cd '$(pwd)' && ./run.sh""", 0
+WinScriptHost.Run "wsl.exe -d $CURRENT_DISTRO -u $USER -- bash -c ""cd '$CURRENT_DIR' && ./run.sh""", 0
 Set WinScriptHost = Nothing
 EOF
-    echo -e "   - Shortcut Windows Startup berhasil dibuat (Distro: \$CURRENT_DISTRO)."
+    echo -e "   - Shortcut Windows Startup berhasil dibuat (Distro: $CURRENT_DISTRO)."
 else
     echo -e "\033[0;33m[WARN] Folder Startup Windows tidak ditemukan.\033[0m"
 fi
+
+# Warna untuk output (pastikan variabel warna sudah didefinisikan sebelumnya atau gunakan raw code)
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+NC='\033[0m'
 
 echo -e "${GREEN}==========================================${NC}"
 echo -e "${GREEN}✅ SETUP SELESAI! GEMINI METADATA SIAP.   ${NC}"
 echo -e "Aplikasi akan otomatis aktif saat Windows menyala."
 echo -e "Untuk tes sekarang, jalankan: ${BLUE}./run.sh${NC}"
-echo -e "${GREEN}==========================================${NC}"
