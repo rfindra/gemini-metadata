@@ -1,4 +1,4 @@
-# processor.py (Final Optimized: RAM Processing & Custom Temp Support)
+# processor.py
 import os
 import time
 import shutil
@@ -32,17 +32,16 @@ def determine_file_type(filename):
     return "Other"
 
 # --- MAIN PROCESSOR (Metadata Generator Only) ---
-# [FIXED] Parameter custom_temp_dir sudah ditambahkan dengan benar di sini
-def process_single_file(filename, provider, model, api_key, base_url, max_retries, options, full_prompt, source_dir, custom_temp_dir=None, blur_threshold=10.0):
+# [UPDATE] Menambahkan parameter 'user_correction'
+def process_single_file(filename, provider, model, api_key, base_url, max_retries, options, full_prompt, source_dir, custom_temp_dir=None, blur_threshold=10.0, user_correction=None):
     thread_id = str(uuid.uuid4())[:8]
     source_path = os.path.join(source_dir, filename)
     ftype = determine_file_type(filename)
     
-    # Tentukan folder kerja (RAMDisk atau Default) untuk file temporary Video/Vector
-    # Jika user memilih folder manual di App, gunakan itu.
+    # Tentukan folder kerja (RAMDisk atau Default)
     working_dir = custom_temp_dir if custom_temp_dir and os.path.exists(custom_temp_dir) else BASE_WORK_DIR
     
-    # Preview Path (Hanya dipakai jika terpaksa, misal Vector/Video)
+    # Preview Path
     preview_filename = f"ai_preview_{thread_id}.jpg"
     preview_path = os.path.join(working_dir, preview_filename)
     
@@ -54,7 +53,7 @@ def process_single_file(filename, provider, model, api_key, base_url, max_retrie
         ai_input_data = None 
         tech_specs = {"context_str": "", "tags": [], "bg_type": "Complex"}
         
-        # [ALUR FOTO - RAM MODE] -> 100% RAM, SSD Adem
+        # [ALUR FOTO - RAM MODE]
         if ftype == "Photo":
             with open(source_path, "rb") as f: file_bytes = f.read()
             img_pil = Image.open(io.BytesIO(file_bytes)).convert("RGB")
@@ -74,10 +73,10 @@ def process_single_file(filename, provider, model, api_key, base_url, max_retrie
             # Resize (Di RAM)
             img_pil.thumbnail((1024, 1024))
             
-            # Save ke Buffer Memory (Bukan ke SSD!)
+            # Save ke Buffer Memory
             img_byte_arr = io.BytesIO()
             img_pil.save(img_byte_arr, format="JPEG", quality=80)
-            ai_input_data = img_byte_arr.getvalue() # Raw bytes untuk dikirim ke AI
+            ai_input_data = img_byte_arr.getvalue()
             
             # Tech Specs
             w, h = img_pil.size
@@ -87,8 +86,7 @@ def process_single_file(filename, provider, model, api_key, base_url, max_retrie
             del file_bytes, img_pil, img_byte_arr
             gc.collect()
 
-        # [ALUR VIDEO - Disk Mode] (Video tetap butuh temp file karena OpenCV)
-        # TAPI: Jika 'working_dir' diarahkan ke RAMDisk, ini jadi 100% RAM juga!
+        # [ALUR VIDEO]
         elif ftype == "Video":
             cap = cv2.VideoCapture(source_path)
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -103,7 +101,6 @@ def process_single_file(filename, provider, model, api_key, base_url, max_retrie
                 scale = 1024 / w
                 frame = cv2.resize(frame, (1024, int(h * scale)))
             
-            # Encode langsung ke Memory jika bisa
             success, encoded_img = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
             if success:
                 ai_input_data = encoded_img.tobytes()
@@ -112,18 +109,17 @@ def process_single_file(filename, provider, model, api_key, base_url, max_retrie
             del frame, encoded_img
             gc.collect()
 
-        # [ALUR VECTOR - Disk Mode] (Ghostscript butuh file input/output)
-        # Jika 'working_dir' adalah RAMDisk, ini aman untuk SSD.
+        # [ALUR VECTOR]
         elif ftype == "Vector":
             import subprocess
+            # WSL menggunakan 'gs' standard Linux
             args = ["gs", "-dNOPAUSE", "-dBATCH", "-sDEVICE=jpeg", "-dEPSCrop", "-r150", 
                    f"-sOutputFile={preview_path}", source_path]
             subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             if os.path.exists(preview_path):
-                # Baca balik ke RAM agar seragam
                 with open(preview_path, "rb") as f:
                     ai_input_data = f.read()
-                try: os.remove(preview_path) # Langsung hapus temp file
+                try: os.remove(preview_path)
                 except: pass
                 tech_specs["context_str"] = "This is a Vector Illustration."
             else:
@@ -132,8 +128,26 @@ def process_single_file(filename, provider, model, api_key, base_url, max_retrie
         if not ai_input_data:
              return {"status": "error", "file": filename, "msg": "Failed to prepare image data"}
 
-        # --- 2. AI INFERENCE ---
-        final_prompt = full_prompt + f"\n[TECHNICAL DATA]: {tech_specs['context_str']} {', '.join(tech_specs['tags'])}"
+        # --- 2. AI INFERENCE (Dengan User Correction Support) ---
+        
+        tech_data_str = f"[TECHNICAL DATA]: {tech_specs['context_str']} {', '.join(tech_specs['tags'])}"
+
+        # Logic Injection Prompt
+        if user_correction:
+            final_prompt = f"""
+            {full_prompt}
+            
+            [🚨 CRITICAL USER OVERRIDE]: 
+            The user has provided specific instructions for this image. You MUST prioritize this over your visual analysis.
+            USER INSTRUCTION: "{user_correction}"
+            
+            Refine the Title, Description, and Keywords to strictly align with the user's instruction above.
+            
+            {tech_data_str}
+            """
+        else:
+            # Standar Prompt
+            final_prompt = full_prompt + "\n" + tech_data_str
         
         response = None
         last_err = ""
@@ -141,7 +155,6 @@ def process_single_file(filename, provider, model, api_key, base_url, max_retrie
         for attempt in range(max_retries + 1):
             try:
                 if attempt > 0: time.sleep(2 * attempt)
-                # Kirim data (Bytes atau Path) ke engine
                 if provider == "Google Gemini (Native)":
                     response = run_gemini_engine(model, api_key, ai_input_data, final_prompt)
                 else:
@@ -152,7 +165,7 @@ def process_single_file(filename, provider, model, api_key, base_url, max_retrie
         if not response:
             return {"status": "error", "file": filename, "msg": f"AI Fail: {last_err}"}
 
-        # --- 3. DATA PREPARATION (LOGIC BARU) ---
+        # --- 3. DATA PREPARATION ---
         raw_kw = response.get("keywords", [])
         if isinstance(raw_kw, str): raw_kw = raw_kw.split(',')
         clean_kw = [k.strip().lower() for k in raw_kw if len(k) > 2][:49]
@@ -161,51 +174,40 @@ def process_single_file(filename, provider, model, api_key, base_url, max_retrie
         clean_title = title.replace('"', '').replace("'", "")
         category = response.get("category", "Uncategorized")
         
-        # [FEATURE REQUEST: SUBJECT = TITLE + VISUAL DETAILS]
         raw_ai_desc = response.get('description', '')
-        # Cek duplikasi agar tidak berulang
         if clean_title.lower() in raw_ai_desc.lower()[:len(clean_title)+5]:
             combined_desc = raw_ai_desc 
         else:
             combined_desc = f"{clean_title}. {raw_ai_desc}"
             
-        # Potong Maksimal 190 Karakter (Agar muat di Windows Subject)
         final_subject_desc = combined_desc[:190].strip()
-        
-        # Rapikan ending
         if final_subject_desc.endswith(('.', ',')): 
             final_subject_desc = final_subject_desc[:-1] + "."
         elif not final_subject_desc.endswith('.'):
             final_subject_desc += "."
 
-        # Keyword Formatting
-        flat_kw_windows = ";".join(clean_kw) # Pemisah ; untuk Windows
-        flat_kw_comma = ", ".join(clean_kw)  # Pemisah , untuk Agency
+        flat_kw_windows = ";".join(clean_kw)
+        flat_kw_comma = ", ".join(clean_kw)
         
-        # New Filename Logic
         final_name = filename
         if options.get("rename", True):
             ext = os.path.splitext(filename)[1].lower()
             safe_title = clean_filename(clean_title)[:50]
+            # UUID tetap dipakai untuk keunikan
             final_name = f"{safe_title}_{str(uuid.uuid4())[:4]}{ext}"
 
-        # --- METADATA MAPPING (LENGKAP) ---
+        # --- METADATA MAPPING ---
         tags_to_write = {
-            # 1. Standar Industri
             "XMP:Title": clean_title,
             "XMP:Description": final_subject_desc, 
             "XMP:Subject": clean_kw,
             "IPTC:Headline": clean_title,
             "IPTC:Caption-Abstract": final_subject_desc,
             "IPTC:Keywords": clean_kw,
-            
-            # 2. Standar Windows Explorer (Properties)
             "EXIF:XPTitle": clean_title,         
             "EXIF:XPKeywords": flat_kw_windows,  
-            "EXIF:XPSubject": final_subject_desc, # Muncul di Subject
+            "EXIF:XPSubject": final_subject_desc,
             "EXIF:XPComment": final_subject_desc,
-            
-            # 3. Extras
             "EXIF:ImageDescription": final_subject_desc,
             "XMP:Rating": 5
         }
@@ -227,7 +229,6 @@ def process_single_file(filename, provider, model, api_key, base_url, max_retrie
         }
 
     except Exception as e:
-        # Cleanup extra jika error
         if 'preview_path' in locals() and os.path.exists(preview_path):
             try: os.remove(preview_path)
             except: pass

@@ -4,17 +4,12 @@ import pandas as pd
 import threading
 from config import DB_FILE
 
-# [CRITICAL UPDATE] Global Lock untuk mencegah "Database Locked" Error
-# Ini memastikan hanya 1 thread yang boleh menulis ke DB dalam satu waktu.
+# Global Lock untuk keamanan thread
 db_lock = threading.Lock()
 
 def init_db():
-    """Inisialisasi tabel database (hanya dijalankan sekali saat start)."""
-    # Tidak perlu lock di sini karena dijalankan di main thread sebelum proses lain mulai
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    
-    # Tabel History Metadata (File)
     c.execute('''
         CREATE TABLE IF NOT EXISTS history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -28,8 +23,6 @@ def init_db():
             output_path TEXT
         )
     ''')
-    
-    # Tabel History Prompt (Prompt Architect)
     c.execute('''
         CREATE TABLE IF NOT EXISTS prompt_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -43,9 +36,8 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- FUNGSI METADATA HISTORY ---
 def add_history_entry(filename, new_filename, title, desc, keywords, category, output_path):
-    with db_lock: # <--- PENGAMAN
+    with db_lock:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -60,8 +52,58 @@ def add_history_entry(filename, new_filename, title, desc, keywords, category, o
         finally:
             conn.close()
 
+# [BARU] Fungsi Update Data setelah Regenerate
+def update_history_entry(old_filename_in_db, new_filename, title, desc, keywords):
+    with db_lock:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        try:
+            # Update data berdasarkan nama file yang tersimpan di DB sebelumnya
+            c.execute('''
+                UPDATE history 
+                SET new_filename = ?, title = ?, description = ?, keywords = ?
+                WHERE new_filename = ?
+            ''', (new_filename, title, desc, keywords, old_filename_in_db))
+            conn.commit()
+        except Exception as e:
+            print(f"DB Update Error: {e}")
+        finally:
+            conn.close()
+
+# [BARU] Ambil Data dengan Pagination & Search (Untuk Gallery Minimalis)
+def get_paginated_history(page=1, per_page=12, search_query=""):
+    with db_lock:
+        conn = sqlite3.connect(DB_FILE)
+        conn.row_factory = sqlite3.Row # Agar bisa akses kolom by name
+        offset = (page - 1) * per_page
+        
+        try:
+            cursor = conn.cursor()
+            
+            if search_query:
+                q = f"%{search_query}%"
+                # Hitung total untuk pagination
+                cursor.execute("SELECT COUNT(*) FROM history WHERE new_filename LIKE ? OR title LIKE ?", (q, q))
+                total_items = cursor.fetchone()[0]
+                
+                # Ambil data
+                cursor.execute("SELECT * FROM history WHERE new_filename LIKE ? OR title LIKE ? ORDER BY id DESC LIMIT ? OFFSET ?", (q, q, per_page, offset))
+            else:
+                cursor.execute("SELECT COUNT(*) FROM history")
+                total_items = cursor.fetchone()[0]
+                
+                cursor.execute("SELECT * FROM history ORDER BY id DESC LIMIT ? OFFSET ?", (per_page, offset))
+            
+            rows = cursor.fetchall()
+            return rows, total_items
+        except Exception as e:
+            print(f"DB Fetch Error: {e}")
+            return [], 0
+        finally:
+            conn.close()
+
 def get_history_df():
-    with db_lock: # <--- PENGAMAN
+    with db_lock:
         conn = sqlite3.connect(DB_FILE)
         try:
             df = pd.read_sql_query("SELECT * FROM history ORDER BY id DESC", conn)
@@ -72,16 +114,15 @@ def get_history_df():
             conn.close()
 
 def clear_history():
-    with db_lock: # <--- PENGAMAN
+    with db_lock:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute("DELETE FROM history")
         conn.commit()
         conn.close()
 
-# --- FUNGSI PROMPT HISTORY ---
 def add_prompt_history(idea, style, model, result):
-    with db_lock: # <--- PENGAMAN
+    with db_lock:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -97,7 +138,7 @@ def add_prompt_history(idea, style, model, result):
             conn.close()
 
 def get_prompt_history_df():
-    with db_lock: # <--- PENGAMAN
+    with db_lock:
         conn = sqlite3.connect(DB_FILE)
         try:
             df = pd.read_sql_query("SELECT * FROM prompt_history ORDER BY id DESC", conn)
@@ -108,26 +149,21 @@ def get_prompt_history_df():
             conn.close()
 
 def clear_prompt_history():
-    with db_lock: # <--- PENGAMAN
+    with db_lock:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute("DELETE FROM prompt_history")
         conn.commit()
         conn.close()
 
-# [BARU] FITUR DASHBOARD QC: Ambil data history terakhir
-def get_recent_history(limit=10):
+def get_recent_history(limit=5):
     with db_lock:
         conn = sqlite3.connect(DB_FILE)
-        conn.row_factory = sqlite3.Row # Agar bisa akses kolom pakai nama (dict-like)
+        conn.row_factory = sqlite3.Row
         try:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM history ORDER BY id DESC LIMIT ?", (limit,))
             rows = cursor.fetchall()
-            # Convert sqlite Row to Dict standard
-            return [dict(row) for row in rows]
-        except Exception as e:
-            print(f"DB Fetch Error: {e}")
-            return []
-        finally:
-            conn.close()
+            return rows
+        except: return []
+        finally: conn.close()
